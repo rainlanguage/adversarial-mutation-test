@@ -1,0 +1,20 @@
+{
+  "name": "rainlanguage-skills",
+  "description": "Claude Code skills published by rainlanguage.",
+  "owner": {
+    "name": "Rain Open Source Software Ltd",
+    "url": "https://github.com/rainlanguage"
+  },
+  "plugins": [
+    {
+      "name": "adversarial-mutation-test",
+      "source": "./",
+      "description": "Build or harden a repository's test suite so every test provably covers code, mutation-validated and resumable.",
+      "version": "0.10.0",
+      "author": {
+        "name": "Rain Open Source Software Ltd"
+      },
+      "keywords": ["testing", "mutation-testing", "coverage", "test-hardening"]
+    }
+  ]
+}
