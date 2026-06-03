@@ -1,7 +1,7 @@
 {
   "name": "adversarial-mutation-test",
   "displayName": "Adversarial Mutation Testing",
-  "version": "0.11.0",
+  "version": "0.12.0",
   "description": "Build or harden a repository's test suite so every test provably covers code, validated by deliberately breaking the line it claims to cover and confirming the test fails. Whole-repo, resumable, language-agnostic.",
   "author": {
     "name": "Rain Open Source Software Ltd",
