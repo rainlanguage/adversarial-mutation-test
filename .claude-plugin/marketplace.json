@@ -10,7 +10,7 @@
       "name": "adversarial-mutation-test",
       "source": "./",
       "description": "Build or harden a repository's test suite so every test provably covers code, mutation-validated and resumable.",
-      "version": "0.13.0",
+      "version": "0.14.0",
       "author": {
         "name": "Rain Open Source Software Ltd"
       },
