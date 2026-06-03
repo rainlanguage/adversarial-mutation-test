@@ -1,7 +1,7 @@
 ---
 name: adversarial-mutation-test
 description: Use to systematically find BUGS in and harden the test suite for a WHOLE repository (or a whole module of it). Two co-equal goals the name carries: ADVERSARIAL (treat spec/intent as the oracle and the code as suspect — derive expected behavior independently and hunt for inputs where the code is wrong) and MUTATION (prove tests cover the code). Mutation-drives a behavior-centric coverage ledger — for each behavior, break the line and check the whole suite: existing tests that kill the mutant are validated and logged (so existing coverage is audited and in scope), and only surviving mutants (real gaps) get a new discriminating test. An existing test that already kills mutants is left as-is; one meant to cover a behavior but that a mutant survives is strengthened in place (not duplicated); one broken on the unmutated baseline is fixed or its underlying code bug surfaced; a test is never edited to swallow a mutation. Designed for long campaigns that outlive the context window: progress lives in a durable gitignored scratch file so it survives compaction. A single change/PR/function is just a narrowed scope. Triggers on "test the whole repo", "harden the test suite", "mutation test the codebase", "audit the tests", "adversarial tests", "prove these tests cover the code", "exhaust the eventualities".
-version: 0.16.0
+version: 0.17.0
 ---
 
 # Adversarial Mutation Testing (whole-repo, resumable)
@@ -111,6 +111,7 @@ Groups are independent (separate branch, additive test-only PR), so fan out **on
 
 - Parallelism is **across** groups; **within** a group the `mutate → regenerate → test → restore` cycle stays serial. Concurrency is bounded (~cores).
 - An orchestrator (e.g. a Workflow) assigns groups, spawns a clone-per-group agent, and aggregates the repo-wide ledger. Opt in when the repo is large enough to justify the per-worker clone + build cost.
+- **For a unit too big for one agent's context, drive a CHUNK loop — and bound it by DRYNESS, never a fixed count.** A 200+-behavior unit won't fit one agent, so the orchestrator dispatches sequential chunk-agents (each takes ~5–8 behaviors off the durable checklist, probes them, commits, marks them, re-surveys for missed ones, returns `remainingTodo` + a `dry` flag) and loops. **Terminate on dryness** (zero `[TODO]` AND the re-survey found nothing new), with a **stall backstop** — stop only after K consecutive chunks that complete 0 new behaviors *and* discover 0 new ones (genuine no-progress) — and optionally a token budget. **NEVER bound the loop with a small fixed chunk count.** A unit with N behaviors at ~B per chunk needs ~N/B chunks, so a constant like 12 or 30 silently TRUNCATES coverage (it is exactly what forced extra resume rounds and left large units paced-not-dry). If a numeric ceiling is unavoidable, DERIVE it from the work — `ceil(behaviors / per_chunk) × margin` — and treat hitting it as an anomaly to report, not a clean finish. A runaway guard exists to catch a pathological loop, not to cap how much of the unit gets covered.
 
 ### Dispatcher duties (YOU, the orchestrator — not the sub-agents)
 
