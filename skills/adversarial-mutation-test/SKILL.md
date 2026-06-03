@@ -1,7 +1,7 @@
 ---
 name: adversarial-mutation-test
 description: Use to systematically find BUGS in and harden the test suite for a WHOLE repository (or a whole module of it). Two co-equal goals the name carries: ADVERSARIAL (treat spec/intent as the oracle and the code as suspect — derive expected behavior independently and hunt for inputs where the code is wrong) and MUTATION (prove tests cover the code). Mutation-drives a behavior-centric coverage ledger — for each behavior, break the line and check the whole suite: existing tests that kill the mutant are validated and logged (so existing coverage is audited and in scope), and only surviving mutants (real gaps) get a new discriminating test. An existing test that already kills mutants is left as-is; one meant to cover a behavior but that a mutant survives is strengthened in place (not duplicated); one broken on the unmutated baseline is fixed or its underlying code bug surfaced; a test is never edited to swallow a mutation. Designed for long campaigns that outlive the context window: progress lives in a durable gitignored scratch file so it survives compaction. A single change/PR/function is just a narrowed scope. Triggers on "test the whole repo", "harden the test suite", "mutation test the codebase", "audit the tests", "adversarial tests", "prove these tests cover the code", "exhaust the eventualities".
-version: 0.14.0
+version: 0.15.0
 ---
 
 # Adversarial Mutation Testing (whole-repo, resumable)
@@ -109,6 +109,16 @@ Groups are independent (separate branch, additive test-only PR), so fan out **on
 - Parallelism is **across** groups; **within** a group the `mutate → regenerate → test → restore` cycle stays serial. Concurrency is bounded (~cores).
 - An orchestrator (e.g. a Workflow) assigns groups, spawns a clone-per-group agent, and aggregates the repo-wide ledger. Opt in when the repo is large enough to justify the per-worker clone + build cost.
 
+### Dispatcher duties (YOU, the orchestrator — not the sub-agents)
+
+Fanning work out does NOT delegate the review; you own the synthesis. The sub-agents wrote the rules above; these are for you.
+
+- **A worker's conclusion is an INPUT, not a verdict.** "No candidates", "no bugs", "all green" from a worker is a claim to audit, never to relay. You have not found "no bugs" until you have reviewed what the worker actually did and saw.
+- **Read the worker's NOTES, not just its structured result.** The buried findings live in the prose. Treat these as red flags to PULL UP into the triage list, regardless of the worker's disposition: "discarded", "not exploitable", "by design", "benign", "safe", "conservative", "expected", "no recovery path", "only a UX issue", "refuted", "out of scope". Each is a worker making a suppression judgment it was told not to make — surface the underlying behavior.
+- **Cross-check against the authoritative oracle yourself.** If a labeled issue set exists (audit, tracker), diff the workers' "clean" areas against it; a worker reporting an area clean that overlaps a known open finding is a miss you must catch (it is how audit L01/M01 got buried under "conservative, safe").
+- **Re-read suspicious reasoning for errors.** Workers analyze things backwards (e.g. claiming "pull before push" for code that pushes before pulling). If a worker's safety argument hinges on an ordering/sign/rounding claim, verify the claim against the code before accepting it.
+- **Your report inherits the weakest worker.** Do not average or vote findings away. One worker's surfaced item survives into your output even if three others "refuted" it — refutation is a note for triage, never a delete.
+
 ## Principles
 
 - **Never edit a test to pass under a MUTATION.** A test failing under a mutation is SUCCESS — it caught the injected bug; reverting the mutation restores green. Changing a test's assertion to swallow a mutation encodes the bug. The only test you adjust *mid-mutation* is a *new* one you just wrote that failed to discriminate (didn't fail under its own target mutation) — strengthen it.
@@ -121,6 +131,7 @@ Groups are independent (separate branch, additive test-only PR), so fan out **on
 - **Always restore** mutations via VCS; verify a clean tree before committing tests.
 - **Comments describe behavior, not the mutation process.**
 - **Scale to scope** — a fix → a handful of mutations; a whole repo → a chunked, tracked, resumable campaign with a warm toolchain, and for very large repos a parallel fan-out (one author + mutation-check pass per module).
+- **The dispatcher owns the synthesis — review sub-agent work, don't relay it.** When you fan out to sub-agents, their conclusions are inputs you must audit, not verdicts you forward. Read their NOTES (not just the structured result) for buried suppressions — "discarded / by design / not exploitable / benign / safe" are items to pull up, not accept. Verify any safety argument that hinges on an ordering/sign/rounding claim against the actual code. Relaying a worker's "no bugs found" without reviewing what it observed is the same rubber-stamp as a bare "Reviewed" on a PR.
 - **Calibrate on known bugs before trusting "none found".** A bug detector is only credible once it catches bugs you already know exist. If there's a labeled set (audit findings, open issues, a regression list), reproduce the still-open ones as failing tests against current code FIRST — that proves the search reaches them and produces the regression tests for free. "No bugs found" from a search that was never shown to catch a known bug is worthless. And use the authoritative oracle's BAR for what counts (UX/accounting/correctness, not only "exploitable").
 - **Question the oracle — adversarial, not just mutation.** Mutation testing makes the code the oracle and can only find test gaps; it CANNOT find a bug, because it pins whatever the code does. The "adversarial" half makes the *spec/intent* the oracle and the code suspect: derive the expected value/property independently and hunt for inputs where the code violates it. A run that only adds passing tests and reports "no bugs" did half the job — say so honestly rather than calling the absence "expected". Every exact-value assertion is a chance to check the value against intent, not just against the code's output.
 - **Exhaust, don't sample — loop until dry.** Probe *every* behavior of a unit, then re-survey for the ones you missed; stop only when a full pass surfaces no new gap. A single pass over the high-value subset is a coverage *sample*, not coverage. A large or expensive-to-probe unit (e.g. one whose tests run etched/regenerated bytecode) gets paced and resumed — never truncated, and never declared done on the strength of "it looked well-tested already".
