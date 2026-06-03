@@ -9,12 +9,12 @@
     {
       "name": "adversarial-mutation-test",
       "source": "./",
-      "description": "Build or harden a repository's test suite so every test provably covers code, mutation-validated and resumable.",
+      "description": "Find BUGS and harden the test suite for a whole repository — adversarial (spec as oracle, code as suspect; surface candidates for triage) + mutation (break each line, prove a test catches it). Whole-repo, resumable, language-agnostic.",
       "version": "0.15.0",
       "author": {
         "name": "Rain Open Source Software Ltd"
       },
-      "keywords": ["testing", "mutation-testing", "coverage", "test-hardening"]
+      "keywords": ["testing", "mutation-testing", "adversarial-testing", "bug-finding", "coverage", "test-hardening", "audit"]
     }
   ]
 }

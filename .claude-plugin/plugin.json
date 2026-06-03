@@ -2,7 +2,7 @@
   "name": "adversarial-mutation-test",
   "displayName": "Adversarial Mutation Testing",
   "version": "0.15.0",
-  "description": "Build or harden a repository's test suite so every test provably covers code, validated by deliberately breaking the line it claims to cover and confirming the test fails. Whole-repo, resumable, language-agnostic.",
+  "description": "Find BUGS and harden the test suite for a whole repository. Two co-equal halves: ADVERSARIAL — treat the spec as the oracle and the code as suspect, hunt for inputs where the code is wrong, and surface candidates for triage (never self-adjudicate); and MUTATION — break each line and prove a test catches it. Whole-repo, resumable, language-agnostic.",
   "author": {
     "name": "Rain Open Source Software Ltd",
     "url": "https://github.com/rainlanguage"
@@ -10,6 +10,6 @@
   "homepage": "https://github.com/rainlanguage/adversarial-mutation-test",
   "repository": "https://github.com/rainlanguage/adversarial-mutation-test",
   "license": "LicenseRef-DCL-1.0",
-  "keywords": ["testing", "mutation-testing", "coverage", "test-hardening", "qa"],
+  "keywords": ["testing", "mutation-testing", "adversarial-testing", "bug-finding", "coverage", "test-hardening", "audit", "qa"],
   "skills": "./skills/"
 }
