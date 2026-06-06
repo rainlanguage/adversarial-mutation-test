@@ -1,7 +1,7 @@
 {
   "name": "adversarial-mutation-test",
   "displayName": "Adversarial Mutation Testing",
-  "version": "0.21.0",
+  "version": "0.22.0",
   "description": "Find BUGS and harden the test suite for a whole repository. Two co-equal halves: ADVERSARIAL — treat the spec as the oracle and the code as suspect, hunt for inputs where the code is wrong, and surface candidates for triage (never self-adjudicate); and MUTATION — break each line and prove a test catches it. Whole-repo, resumable, language-agnostic.",
   "author": {
     "name": "Rain Open Source Software Ltd",

@@ -1,7 +1,7 @@
 ---
 name: adversarial-mutation-test
 description: Use to systematically find BUGS in and harden the test suite for a WHOLE repository (or a whole module of it). Two co-equal goals the name carries: ADVERSARIAL (treat spec/intent as the oracle and the code as suspect — derive expected behavior independently and hunt for inputs where the code is wrong) and MUTATION (prove tests cover the code). Mutation-drives a behavior-centric coverage ledger — for each behavior, break the line and check the whole suite: existing tests that kill the mutant are validated and logged (so existing coverage is audited and in scope), and only surviving mutants (real gaps) get a new discriminating test. An existing test that already kills mutants is left as-is; one meant to cover a behavior but that a mutant survives is strengthened in place (not duplicated); one broken on the unmutated baseline is fixed or its underlying code bug surfaced; a test is never edited to swallow a mutation. Designed for long campaigns that outlive the context window: progress lives in a durable gitignored scratch file so it survives compaction. A single change/PR/function is just a narrowed scope. Triggers on "test the whole repo", "harden the test suite", "mutation test the codebase", "audit the tests", "adversarial tests", "prove these tests cover the code", "exhaust the eventualities".
-version: 0.21.0
+version: 0.22.0
 ---
 
 # Adversarial Mutation Testing (whole-repo, resumable)
@@ -130,6 +130,27 @@ Fanning work out does NOT delegate the review; you own the synthesis. The sub-ag
 - **Re-read suspicious reasoning for errors.** Workers analyze things backwards (e.g. claiming "pull before push" for code that pushes before pulling). If a worker's safety argument hinges on an ordering/sign/rounding claim, verify the claim against the code before accepting it.
 - **Your report inherits the weakest worker.** Do not average or vote findings away. One worker's surfaced item survives into your output even if three others "refuted" it — refutation is a note for triage, never a delete.
 
+## Leave a committed scan record (org-wide health tracking)
+
+At the END of a run, commit a **minimal, machine-readable** record so an org-wide health-check can tell which repos were scanned recently from which are stale — and against **which release**. This is the inverse of `PROGRESS.md`: that is gitignored local working state; this is a small **committed** file that travels with the repo.
+
+- **Predictable path, same in every repo** so a health-check can fetch it uniformly (`gh api` / raw URL): **`.mutation-test-scans.json`** at the repo root. (It lives OUTSIDE the gitignored `.mutation-test/` dir precisely so it is committed.)
+- **Append one entry per run** (keep history; the health-check reads the newest `timestamp` for recency):
+  ```json
+  {
+    "timestamp": "2026-06-06T19:40:00Z",          // UTC, when the run finished
+    "commit": "08d547f…",                          // the exact SHA scanned
+    "publishedTag": "v1.2.3",                       // the published/release version AT that commit, or null if unreleased
+    "commitsAheadOfTag": 0,                         // how far the scanned commit is past that tag
+    "scope": "whole repo",                          // or the module scoped
+    "tool": "adversarial-mutation-test", "skillVersion": "0.22.0",
+    "summary": { "behaviours": 600, "candidates": 89, "confirmed": 30, "filed": ["#2651","#2660"] }
+  }
+  ```
+- **Record what was CHECKED — including the published tag.** Staleness is "which *release* was last audited," not just "when." Resolve the published version at the scanned commit: the release tag (`git describe --tags --abbrev=0`), and/or the version in the package manifest (`soldeer.toml` / `Cargo.toml` / `package.json`). If the scanned commit is ahead of the last release, record both the tag and `commitsAheadOfTag`.
+- **Land it on the default branch** — include the record commit in the findings PR, or a tiny dedicated PR; a record that never leaves a local branch is invisible to the org health-check. (Commit it even if the run found nothing — "scanned, clean, on date X" is exactly the signal a health-check needs.)
+- Minimal is fine: `timestamp` + `commit` + `publishedTag` are the must-haves; the `summary` is nice-to-have.
+
 ## Principles
 
 - **Never edit a test to pass under a MUTATION.** A test failing under a mutation is SUCCESS — it caught the injected bug; reverting the mutation restores green. Changing a test's assertion to swallow a mutation encodes the bug. The only test you adjust *mid-mutation* is a *new* one you just wrote that failed to discriminate (didn't fail under its own target mutation) — strengthen it.
@@ -146,3 +167,4 @@ Fanning work out does NOT delegate the review; you own the synthesis. The sub-ag
 - **A passing test is not a correct behavior — coverage ≠ correctness.** A test killing a mutant only proves the test and the code agree, and tests routinely mirror the implementation (assert the code's own output / recompute with the same formula), so a green test can faithfully enshrine a bug. Run the correctness check on covered behaviors too; treat a test whose expected values look derived from the code as a red flag and re-derive them independently from the spec. "An existing test covers it" is never validation, and never a reason to skip adversarial scrutiny.
 - **Question the oracle — adversarial, not just mutation.** Mutation testing makes the code the oracle and can only find test gaps; it CANNOT find a bug, because it pins whatever the code does. The "adversarial" half makes the *spec/intent* the oracle and the code suspect: derive the expected value/property independently and hunt for inputs where the code violates it. A run that only adds passing tests and reports "no bugs" did half the job — say so honestly rather than calling the absence "expected". Every exact-value assertion is a chance to check the value against intent, not just against the code's output.
 - **Exhaust, don't sample — loop until dry.** Probe *every* behavior of a unit, then re-survey for the ones you missed; stop only when a full pass surfaces no new gap. A single pass over the high-value subset is a coverage *sample*, not coverage. A large or expensive-to-probe unit (e.g. one whose tests run etched/regenerated bytecode) gets paced and resumed — never truncated, and never declared done on the strength of "it looked well-tested already".
+- **End with a committed scan record.** Every run closes by appending an entry to a committed `.mutation-test-scans.json` (timestamp, scanned commit, published tag, scope, summary) and landing it on the default branch — even a clean run — so org-wide health tracking can distinguish recently-scanned repos from stale ones and know which release was audited.
