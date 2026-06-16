@@ -10,7 +10,7 @@
       "name": "adversarial-mutation-test",
       "source": "./",
       "description": "Find BUGS and harden the test suite for a whole repository — adversarial (spec as oracle, code as suspect; surface candidates for triage) + mutation (break each line, prove a test catches it). Whole-repo, resumable, language-agnostic.",
-      "version": "0.24.0",
+      "version": "0.25.0",
       "author": {
         "name": "Rain Open Source Software Ltd"
       },
