@@ -1,7 +1,7 @@
 ---
 name: adversarial-mutation-test
 description: Use to systematically find BUGS in and harden the test suite for a WHOLE repository (or a whole module of it). Two co-equal goals the name carries: ADVERSARIAL (treat spec/intent as the oracle and the code as suspect — derive expected behavior independently and hunt for inputs where the code is wrong) and MUTATION (prove tests cover the code). Mutation-drives a behavior-centric coverage ledger — for each behavior, break the line and check the whole suite: existing tests that kill the mutant are validated and logged (so existing coverage is audited and in scope), and only surviving mutants (real gaps) get a new discriminating test. An existing test that already kills mutants is left as-is; one meant to cover a behavior but that a mutant survives is strengthened in place (not duplicated); one broken on the unmutated baseline is fixed or its underlying code bug surfaced; a test is never edited to swallow a mutation. Designed for long campaigns that outlive the context window: progress lives in a durable gitignored scratch file so it survives compaction. A single change/PR/function is just a narrowed scope. Triggers on "test the whole repo", "harden the test suite", "mutation test the codebase", "audit the tests", "adversarial tests", "prove these tests cover the code", "exhaust the eventualities".
-version: 0.24.0
+version: 0.25.0
 ---
 
 # Adversarial Mutation Testing (whole-repo, resumable)
@@ -13,21 +13,24 @@ This has TWO co-equal goals, and the name carries both: **adversarial** = hunt f
 
 Doing only the mutation half is the common failure: it pins whatever the code currently does and structurally CANNOT find a bug, then rationalizes "no bugs found" as fine. A run that adds tests but never tries to break the code has done half the job. Every unit gets BOTH passes (see the adversarial pass below).
 
-A whole-repo run is long and **will outlive the conversation's context window**. Treat conversation memory as unreliable: the durable scratch file (below) is the single source of truth, and committed git history is the durable record of the work itself.
+A whole-repo run is long and **will outlive the conversation's context window**. Treat conversation memory as unreliable; committed git history (tests, filed issues) is the durable record of the work itself.
 
-## 0. Durable progress — set up FIRST (survives compaction)
+**Run this in ultracode — native Workflow orchestration.** This skill is written for ultracode: the whole-repo campaign is a fan-out driven by the native Workflow tool — `agent()` / `parallel()` / `pipeline()`, `isolation:'worktree'`, schema-forced structured returns, the run journal (`resumeFromRunId`), and `budget`. Let those primitives own orchestration — isolation, concurrency, resume, and convergence — and do NOT hand-roll them. The **orchestrator** (the agent authoring the Workflow) owns the survey-slice, the loop-until-dry convergence, and the final synthesis; subagents do the per-unit work and return validated findings. A narrowed scope (one change / PR / function) can run inline and serial without a Workflow; everywhere below, "orchestrator" means the Workflow script when fanned out, and the serial driver when not.
 
-Create a **gitignored scratch file** as the source of truth for the campaign:
+## 0. Durable progress — two roles, kept separate
 
-- Path: `.mutation-test/PROGRESS.md` at repo root.
+A long run has two distinct durability needs; don't collapse them into one mechanism:
+
+- **Run-time resume + convergence (fan-out) is owned NATIVELY.** Re-invoke the Workflow with `resumeFromRunId` and the unchanged prefix of `agent()` calls replays from cache — completed units/batches are never re-run. The orchestrator's own loop state (the sliced worklist, round counter, seen-set) is the convergence signal. Do NOT recover run state by having agents read/write a shared progress file — that is the agents-edit-shared-state bug (see Parallelizing).
+- **Human/audit trail + serial-mode resume is a gitignored scratch file** `.mutation-test/PROGRESS.md` at repo root. It is the human-readable narrative and, in the non-Workflow serial mode (a narrowed scope run inline), the resume source. It is **never** the run-time convergence signal for a fan-out.
+
+Set up the scratch file first:
 - Make git ignore it **without a tracked change**: append `.mutation-test/` to `.git/info/exclude` (preferred — no repo diff). Use `.gitignore` only if the team wants it shared.
 - It holds: **scope**; the **harness commands** (build / test / regenerate-artifacts / coverage); the full **worklist** with per-unit status; and the per-unit **mutation matrices**.
 
-Protocol (non-negotiable for a long run):
-- **On every entry/iteration, READ `.mutation-test/PROGRESS.md` first** to recover state. If it's missing, you're starting fresh (do the survey). If it exists, resume from it — do not re-derive progress from the conversation.
-- **Mark exactly one unit `IN PROGRESS`** with a one-line note of the precise sub-step, so a mid-unit interruption resumes exactly.
-- **After every unit, update the file** (mark `DONE`, record its matrix + the commit hash) before moving on.
-- Keep the file small and skimmable — it's read every iteration.
+Protocol:
+- **Serial mode (no Workflow):** on re-entry after compaction, READ PROGRESS.md to recover; **mark exactly one unit `IN PROGRESS`** with a one-line note of the precise sub-step so a mid-unit interruption resumes exactly; after each unit update it (`DONE`, matrix, commit hash). Keep it small and skimmable.
+- **Fan-out mode:** the orchestrator writes PROGRESS.md (and the committed audit record) ONCE, from the aggregated structured returns of its agents — subagents never edit it; resume is `resumeFromRunId`, not parsing the file. **So every "record … in PROGRESS.md" / "resume there next iteration" instruction in the steps below is the *serial-mode* action**; under a Workflow the executing agent instead RETURNS that (its matrix, bug candidates, branch/PR, unprobed list) as its schema-validated result, and the orchestrator records it once.
 
 Suggested format:
 ```
@@ -60,7 +63,7 @@ The ledger is **behavior-centric**: each behavior gets a row recording the mutat
 2. **Prioritize, chunk, and group.** Order by risk × coverage gap (security-critical / complex / untested first). Process **one unit at a time**, but organize the worklist into **logical groups** — a module / package / coverage area (a handful of related units) is one group, and **each group ships as its own branch + PR**. This keeps PRs small and reviewable and ships coverage incrementally instead of one giant branch.
 3. **Learn the harness once.** Discover build/test commands and any **artifact-regeneration** step (compiled output, generated bindings, etched/deployed bytecode, golden files, snapshots) BEFORE mutating. Record them in PROGRESS.md. Re-running tests after editing source but without regenerating the artifact they execute tests **nothing**.
 4. **Run the per-unit loop**, **committing each unit's tests** as you finish it (durable record; the scratch file only tracks meta-progress). Work each group on its own branch off the default. When a group's units are done and the suite is green, **push and open a PR for that group**, then start the next group on a fresh branch. Added tests are additive (no source/bytecode change), so per-group test PRs are independent and CI-safe — they review and merge on their own; don't accumulate everything on one branch. Record each group's branch + PR in PROGRESS.md.
-5. **Resume.** On re-entry after compaction / a new turn / a restart: read PROGRESS.md, pick up the current group's `[WIP]` (or next `[TODO]`) unit, continue. If a group is finished but unshipped, push + open its PR first. Stop only when the worklist (or agreed scope) is exhausted; then report repo-wide coverage proven, the PRs opened, and gaps remaining.
+5. **Resume.** Serial mode: on re-entry, read PROGRESS.md and pick up the current group's `[WIP]` (or next `[TODO]`) unit. Fan-out mode: re-invoke the Workflow with `resumeFromRunId` — the journal replays completed agents from cache and the orchestrator's sliced-list state resumes convergence; the audit record is regenerated from the aggregated returns, not parsed to decide what to redo. Either way: never re-do a completed unit; if a group is finished but unshipped, push + open its PR first; stop only when the worklist (or agreed scope) is exhausted, then report repo-wide coverage proven, the PRs opened, and gaps remaining.
 
 ## The per-unit loop
 
@@ -107,28 +110,37 @@ The output of this pass is a **triaged finding with a verified repro**, not a pa
 
 Pick the mutation that maps to exactly one behavior so the failing-test set is diagnostic.
 
-## Parallelizing across groups (optional, for large repos)
+## Parallelizing across groups (the native fan-out)
 
-Groups are independent (separate branch, additive test-only PR), so fan out **one sub-agent per group, each in its own fresh clone**. A fresh clone per worker is required, not a nicety: mutation testing mutates shared source, so workers cannot share a checkout. Each worker clones the repo, provisions it (install deps + build), runs its group's per-unit loop, then commits, pushes, and opens its own PR.
+Groups are independent (separate branch, additive test-only PR), so fan them out with the native Workflow: one `agent()` per group, collected with `parallel(thunks)` (a barrier — you want every group's ledger together to aggregate) or `pipeline(groups, …)` for per-item flow. Each worker runs its group's per-unit loop, then commits, pushes, and opens its own PR. Let the runtime own the mechanics:
 
-- Parallelism is **across** groups; **within** a group the `mutate → regenerate → test → restore` cycle stays serial. Concurrency is bounded (~cores).
-- An orchestrator (e.g. a Workflow) assigns groups, spawns a clone-per-group agent, and aggregates the repo-wide ledger. Opt in when the repo is large enough to justify the per-worker clone + build cost.
-- **Be resilient to transient failures — retry, don't drop.** Clones, dependency installs, and builds fail transiently (network blips, flaky registries, rate limits); a single such failure must NOT silently kill a worker or leave a whole group/sub-area uncovered. Make provisioning self-healing: retry the clone/install/build a few times (clean the partial checkout between attempts) before giving up. And the orchestrator must DISTINGUISH "worker found nothing" from "worker failed to provision" — a group that returned empty because its setup errored is a GAP to re-dispatch, not a clean result. Re-run a failed group **promptly, in parallel with the others** — never park it "until the end" (it just gets forgotten, and the run reports false coverage). The run isn't complete until every group either produced results or is genuinely, verifiably empty.
-- **Clean up the per-worker clones when the run ends.** Each worker's clone is throwaway scratch infrastructure — a full provisioned checkout (deps + build artifacts, hundreds of MB each). When the run finishes or is abandoned, DELETE the clones it created — but FIRST check each for unpushed commits / uncommitted work and preserve anything of value (push it, or capture it in the issue/PR). Reusing a clone by resetting it to a new branch is NOT cleanup; left alone they pile up across runs. Keep at most one provisioned base clone if more runs are likely (re-provisioning is the only cost). Never delete a checkout you didn't create for this run.
-- **For a unit too big for one agent's context, the ORCHESTRATOR slices the worklist — do NOT have agents self-select from a shared file.** Have the survey step RETURN the enumerated behaviour/unit list (not just a count). Then partition that list **in orchestrator code** into disjoint batches (~5–8 each) and dispatch one agent per batch with its EXPLICIT items in the prompt. Every behaviour is assigned exactly once; coverage is deterministic and exhaustive by construction.
-  - **The failure mode this avoids (learned the hard way):** do NOT have chunk-agents read a shared `[TODO]` checklist, pick "the next few", probe them, and mark them `[HUNTED]` across iterations, with the loop terminating on a `dry` flag. Sub-agents reliably skip the bookkeeping — so the checklist never updates, every chunk re-reads the same `[TODO]`s and re-does the same work, the `dry` flag never flips, and the loop runs its whole budget doing duplicate work (≈180 agents, zero net progress, large wasted compute, in one real run). **Convergence must depend on orchestrator-controlled state (the sliced list is exhausted), never on agents faithfully editing shared state.**
-  - **To catch what the survey missed**, run a discrete SECOND round in orchestrator code: collect any new behaviours the batch-agents surface in their structured returns, re-slice those, fan out again — repeat until a round surfaces nothing new. That is the real "loop until dry", driven by the orchestrator, not by agents marking a file.
-  - The durable scratch file is for the human/resume audit trail, NOT the run-time convergence signal. And still: **never cap coverage with a small fixed agent count** — the orchestrator runs as many batches as the (possibly growing) list requires; a numeric ceiling is only a runaway backstop, not a coverage cap.
+- **Isolation is `isolation:'worktree'`, not a hand-rolled clone.** Mutation mutates shared source, so workers must NOT share a working tree. `agent(prompt, {isolation:'worktree'})` gives each agent a fresh git worktree of the current repo — separate working files (so a mutation and its rebuilt/regenerated artifact are live only in that worker), shared object store, auto-removed when unchanged. That satisfies the no-shared-checkout requirement far more cheaply than a full clone, with no manual cleanup. **A real per-worker clone is only for the org-wide sweep across DIFFERENT repos** (one repo per agent) — worktrees don't apply there, and the clone-cleanup note below does.
+- **Each worker still builds/regenerates inside its worktree.** Worktrees share the object store but have their own working files, so per-worktree builds are correctly isolated — keep the install / build / regenerate-artifact step so the mutated source is what the tests actually execute (stale shared artifacts are the #1 way mutation lies). Parallelism is **across** groups; **within** a group the `mutate → regenerate → test → restore` cycle stays serial.
+- **Don't hand-manage concurrency.** The runtime auto-caps at `min(16, cpu-2)` and backstops total agents at 1000 (a runaway guard, NEVER a coverage cap). Emit one agent per group/batch and let the scheduler throttle.
+- **Effort per stage.** Probing (mutate → regenerate → test → restore, observe pass/fail) is mechanical — run probe agents at `effort:'low'`. Killing a survivor with a discriminating test, and the whole adversarial correctness pass + the final synthesis, are hard reasoning — `effort:'high'`/`'xhigh'` (and the strongest model available). Don't run the bug-finding half at probe altitude.
+- **Failed vs empty is the native `null` contract — don't re-implement it.** An agent that dies after the runtime's retries returns `null`; `.filter(Boolean)` drops those, and a `null` is your re-dispatch signal. An agent that ran and returned a schema-valid empty result genuinely found nothing. So "failed to provision" vs "found nothing" is distinguished for free — no sentinel bookkeeping. `agent()` retries only terminal **API** errors, so a clone / install / build failure INSIDE a worker is the worker's OWN bash to retry (have its prompt retry a few times, cleaning the partial checkout between attempts). A group whose agent came back `null` is a GAP — re-dispatch it **promptly, in parallel with the rest**, never parked "until the end"; the run isn't complete until every group either produced results or is verifiably empty.
+- **Cleanup is for clones only.** Native worktrees auto-remove when unchanged — do NOT hand-delete them. For the multi-repo clone case, delete the clones the run created when it ends — but FIRST check each for unpushed commits / uncommitted work and preserve anything of value (push it, or capture it in the issue/PR). Never delete a checkout you didn't create for this run.
 
-### Dispatcher duties (YOU, the orchestrator — not the sub-agents)
+### Survey → slice → loop-until-dry (orchestrator-owned)
 
-Fanning work out does NOT delegate the review; you own the synthesis. The sub-agents wrote the rules above; these are for you.
+For a unit too big for one agent's context, the **orchestrator** slices the worklist — do NOT have agents self-select from a shared file.
+
+- **Survey returns a validated list, not a count.** Run the survey as `agent(prompt, {schema})` forcing an array of behaviour/unit items; the Workflow validates at the tool layer, so the orchestrator gets a real array to `.slice()` with zero parsing. Force every downstream probe / kill / adversarial agent to a schema too, so the coverage ledger and triage list assemble from validated returns, never parsed prose.
+- **Partition in orchestrator code** into disjoint batches (~5–8 items) and dispatch one agent per batch with its EXPLICIT items in the prompt. Every behaviour is assigned exactly once; coverage is deterministic and exhaustive by construction.
+- **Converge with the native loop-until-dry, in orchestrator code.** Collect each round's structured returns (via `parallel()`, so you have the whole round), add newly-surfaced behaviours to a **seen-set**, re-slice the new ones, and fan out again — repeat until a round adds nothing new. Dedup against the seen-set, NOT against confirmed gaps. Convergence depends on orchestrator-controlled state (the sliced list is exhausted), **never** on agents faithfully editing shared state.
+  - **The failure mode this avoids (learned the hard way):** do NOT have chunk-agents read a shared `[TODO]` checklist, pick "the next few", probe them, and mark them `[HUNTED]` across iterations with the loop terminating on a `dry` flag. Sub-agents reliably skip the bookkeeping — so the checklist never updates, every chunk re-reads the same `[TODO]`s and re-does the same work, the `dry` flag never flips, and the loop burns its whole budget on duplicate work (≈180 agents, zero net progress, large wasted compute, in one real run).
+- **Cross-restart resume is `resumeFromRunId`** — re-invoking the Workflow replays the journaled `agent()` calls from cache, so completed batches aren't re-run and the orchestrator's loop state reconstructs natively; you don't hand-persist the sliced list.
+- **Never cap coverage with a fixed agent count** — run as many batches as the (possibly growing) list requires; the 1000-agent cap is only the runaway backstop. Scale rounds to `budget.remaining()` when the user set a token target.
+
+### Dispatcher duties (YOU, the orchestrator authoring the Workflow — not the sub-agents)
+
+Fanning work out does NOT delegate the review; you own the synthesis, at high effort, AFTER the Workflow returns. The sub-agents wrote the rules above; these are for you.
 
 - **A worker's conclusion is an INPUT, not a verdict.** "No candidates", "no bugs", "all green" from a worker is a claim to audit, never to relay. You have not found "no bugs" until you have reviewed what the worker actually did and saw.
-- **Read the worker's NOTES, not just its structured result.** The buried findings live in the prose. Treat these as red flags to PULL UP into the triage list, regardless of the worker's disposition: "discarded", "not exploitable", "by design", "benign", "safe", "conservative", "expected", "no recovery path", "only a UX issue", "refuted", "out of scope". Each is a worker making a suppression judgment it was told not to make — surface the underlying behavior.
+- **Put the prose where you can act on it — make NOTES a schema field.** The buried findings live in the prose, so force each worker's structured return to carry it (e.g. `{candidates, notes, suppressionFlags}`). Then every "discarded", "not exploitable", "by design", "benign", "safe", "conservative", "expected", "no recovery path", "only a UX issue", "refuted", "out of scope" lands in a validated field you iterate **deterministically** — surfacing the buried behavior is orchestrator code, not a hope that you read free prose.
+- **Union, never vote.** Collect verify agents with `parallel(thunks).filter(Boolean)` and UNION every surfaced candidate into the triage list; a skeptic's refutation attaches as a NOTE, never gates or out-votes the finding. Your report inherits the weakest worker — one surfaced item survives even if three others "refuted" it. Do not average findings away.
 - **Cross-check a worker's "clean" claim against the oracle yourself.** Re-derive the intended behavior for an area a worker reports clean and confirm it actually exercised the risky cases (conservation, rounding direction, decimals, isolation, access) against the spec — "clean" is a claim to verify, not accept (it is how subtle accounting findings get buried under "conservative, safe").
 - **Re-read suspicious reasoning for errors.** Workers analyze things backwards (e.g. claiming "pull before push" for code that pushes before pulling). If a worker's safety argument hinges on an ordering/sign/rounding claim, verify the claim against the code before accepting it.
-- **Your report inherits the weakest worker.** Do not average or vote findings away. One worker's surfaced item survives into your output even if three others "refuted" it — refutation is a note for triage, never a delete.
 
 ## Leave a committed scan record (org-wide health tracking)
 
@@ -143,7 +155,7 @@ At the END of a run, commit a **minimal, machine-readable** record so an org-wid
     "publishedTag": "v1.2.3",                       // the published/release version AT that commit, or null if unreleased
     "commitsAheadOfTag": 0,                         // how far the scanned commit is past that tag
     "scope": "whole repo",                          // or the module scoped
-    "tool": "adversarial-mutation-test", "skillVersion": "0.24.0",
+    "tool": "adversarial-mutation-test", "skillVersion": "0.25.0",
     "summary": { "behaviours": 600, "candidates": 89, "confirmed": 30, "filed": ["#2651","#2660"] }
   }
   ```
@@ -159,7 +171,7 @@ At the END of a run, commit a **minimal, machine-readable** record so an org-wid
 - **Discriminating assertions** — "got 3, expected 1" beats "it reverted".
 - **One mutation, one behavior** — isolation makes the failing set identify the covered line.
 - **Confirm the mutation is live** — stale artifacts are the #1 way this lies to you.
-- **Durable state, not conversation memory** — PROGRESS.md is authoritative; commit tests per unit.
+- **Durable state, not conversation memory** — committed tests/issues are the durable record of WORK; PROGRESS.md is the authoritative HUMAN/audit narrative; under a Workflow, run-time resume and convergence are owned natively (the run journal / `resumeFromRunId` + cached agent results + orchestrator loop state), not by PROGRESS.md.
 - **Always restore** mutations via VCS; verify a clean tree before committing tests.
 - **Comments describe behavior, not the mutation process.**
 - **Scale to scope** — a fix → a handful of mutations; a whole repo → a chunked, tracked, resumable campaign with a warm toolchain, and for very large repos a parallel fan-out (one author + mutation-check pass per module).
