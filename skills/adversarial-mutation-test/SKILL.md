@@ -171,6 +171,11 @@ At the END of a run, commit a **minimal, machine-readable** record so an org-wid
 - **Discriminating assertions** — "got 3, expected 1" beats "it reverted".
 - **One mutation, one behavior** — isolation makes the failing set identify the covered line.
 - **Confirm the mutation is live** — stale artifacts are the #1 way this lies to you.
+- **Harden the probe harness itself — a lying harness fakes the whole campaign.** Four integrity rules, each from a real incident where the matrix was silently wrong:
+  - **Commit (or pin) the suite BEFORE the first probe.** Restore-via-VCS restores committed state; when the new tests share a file with the mutated source (e.g. a Rust in-file `#[cfg(test)]` module) and are uncommitted, the first restore WIPES them — every later probe runs testless and reports universal survival.
+  - **Assert the baseline count before probing.** The harness must run the clean tree first and abort unless it sees the expected `N passed`; "0 tests ran" must be a loud failure, never a silent "everything survived".
+  - **Classify probe outcomes from the test harness's own result line, not by grepping for "error".** `cargo test` prints `error: test failed` on every KILL — a naive error-grep reclassifies kills as compile failures. Harness-ran (result line present) → killed/survived from the failing-test list; result line absent → the mutation was invalid.
+  - **Scope automated mutations away from the oracle.** A whole-file sed can rewrite the test module's expected values in lockstep with the code (same literal in both) — the mutant then "survives" against a co-mutated oracle. Restrict the mutation to the code region (address range above `#[cfg(test)]`, exclude test dirs), and treat a survival whose diff touched test code as void.
 - **Durable state, not conversation memory** — committed tests/issues are the durable record of WORK; PROGRESS.md is the authoritative HUMAN/audit narrative; under a Workflow, run-time resume and convergence are owned natively (the run journal / `resumeFromRunId` + cached agent results + orchestrator loop state), not by PROGRESS.md.
 - **Always restore** mutations via VCS; verify a clean tree before committing tests.
 - **Comments describe behavior, not the mutation process.**
