@@ -1,0 +1,52 @@
+name: version hygiene
+on:
+  pull_request:
+
+permissions:
+  contents: read
+
+jobs:
+  version-hygiene:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          # Full history so the PR base is available to diff and read against.
+          fetch-depth: 0
+
+      # The marketplace listing is the only published version pointer (this repo
+      # tags no releases), so it must name the same version as the plugin it
+      # serves. Skew here silently publishes the wrong version to installers —
+      # adversarial-mutation-test once advertised 0.26.0 while its plugin.json
+      # already said 0.27.0.
+      - name: plugin.json and marketplace.json versions agree
+        run: |
+          plugin=$(jq -r '.version' .claude-plugin/plugin.json)
+          market=$(jq -r '.plugins[0].version' .claude-plugin/marketplace.json)
+          if [ "$plugin" != "$market" ]; then
+            echo "::error::plugin.json ($plugin) and marketplace.json ($market) disagree. A published listing must match the plugin it serves — bump both together."
+            exit 1
+          fi
+          echo "versions agree: $plugin"
+
+      # A skill's content IS its release. Editing skills/ without bumping the
+      # version is invisible to version-based update detection ('/plugin' compares
+      # version strings), so every install silently keeps running the stale
+      # content. The audit skill shipped its deploy-record-gap fixes in-place
+      # under 0.13.0 exactly this way, and no installer could tell.
+      - name: a change under skills/ must bump plugin.json version
+        env:
+          BASE: ${{ github.event.pull_request.base.sha }}
+          HEAD: ${{ github.event.pull_request.head.sha }}
+        run: |
+          if git diff --quiet "$BASE" "$HEAD" -- skills/; then
+            echo "skills/ unchanged — no version bump required."
+            exit 0
+          fi
+          base_version=$(git show "$BASE:.claude-plugin/plugin.json" | jq -r '.version')
+          head_version=$(git show "$HEAD:.claude-plugin/plugin.json" | jq -r '.version')
+          if [ "$base_version" = "$head_version" ]; then
+            echo "::error::skills/ changed but .claude-plugin/plugin.json version is still $head_version. Bump it (and marketplace.json to match) — a content change is a release, and version-based update detection cannot see an in-place edit."
+            exit 1
+          fi
+          echo "skills/ changed and version bumped: $base_version -> $head_version"
