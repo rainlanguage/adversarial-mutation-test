@@ -1,7 +1,7 @@
 ---
 name: adversarial-mutation-test
 description: Use to systematically find BUGS in and harden the test suite for a WHOLE repository (or a whole module of it). Two co-equal goals the name carries: ADVERSARIAL (treat spec/intent as the oracle and the code as suspect — derive expected behavior independently and hunt for inputs where the code is wrong) and MUTATION (prove tests cover the code). Mutation-drives a behavior-centric coverage ledger — for each behavior, break the line and check the whole suite: existing tests that kill the mutant are validated and logged (so existing coverage is audited and in scope), and only surviving mutants (real gaps) get a new discriminating test. An existing test that already kills mutants is left as-is; one meant to cover a behavior but that a mutant survives is strengthened in place (not duplicated); one broken on the unmutated baseline is fixed or its underlying code bug surfaced; a test is never edited to swallow a mutation. Designed for long campaigns that outlive the context window: progress lives in a durable gitignored scratch file so it survives compaction. A single change/PR/function is just a narrowed scope. Triggers on "test the whole repo", "harden the test suite", "mutation test the codebase", "audit the tests", "adversarial tests", "prove these tests cover the code", "exhaust the eventualities".
-version: 0.26.0
+version: 0.28.0
 ---
 
 # Adversarial Mutation Testing (whole-repo, resumable)
@@ -96,7 +96,24 @@ Run this PER UNIT alongside the mutation loop — it is the half that finds bugs
 
 Record bug candidates separately from coverage in PROGRESS.md (e.g. a `## SUSPECTED BUGS` section): unit, the violated property, the repro, verify status (real / refuted / needs-input). "No bugs found" is only credible after this pass actually ran.
 
-The output of this pass is a **triaged finding with a verified repro**, not a passing test merged into the suite: a bug-repro merged green either enshrines the bug or rots red, so it belongs ON the finding (the mutation pass produces the green coverage PRs; the adversarial pass produces filed issues + their repros). And **re-verify a candidate yourself before filing it** — re-run the repro against current code, because a sub-agent's scratch repro is often gone or asserted the wrong thing; file only what you reproduce.
+The output of this pass is a **triaged finding with a verified repro**, not a passing test merged into the suite: a bug-repro merged green either enshrines the bug or rots red, so it belongs ON the finding (the mutation pass produces the green coverage PRs; the adversarial pass produces filed issues + their repros). And **re-verify a candidate yourself before filing it** — re-run the repro against current code, because a sub-agent's scratch repro is often gone or asserted the wrong thing; file only what you reproduce. File it per **Findings → issues** below — including the label gate, which is what makes the finding visible to anything outside the issue itself.
+
+## Findings → issues (the adversarial pass's output)
+
+Findings are tracked as **GitHub issues** — the durable product record, and the half of the run that is not a PR. The orchestrator files them after synthesis and after re-verifying each repro, not per-agent mid-run.
+
+- **Every filed finding carries the `audit` label. It is not optional.** `audit` is the org-wide handle for "this repo has an outstanding finding": the `rain-org-health` scan counts a repo's backlog with `gh search issues --owner <org> --label audit --state open`. A finding filed without it is **invisible** — the graph reports the repo as having zero outstanding findings, so as far as every consumer downstream of the issue is concerned the finding does not exist. This is not hypothetical: `rain.solmem`'s adversarial pass filed three real findings (#50, #54, #55) with no label, and the dashboard read `openAuditIssues: 0` until they were hand-labelled days later.
+- **Create the label set FIRST (mandatory, before the first `gh issue create`).** `gh issue create --label <name>` **hard-fails when the label does not exist in that repo**, and a repo being scanned for the first time usually has neither label. So, once per repo, list what exists and create every missing label before filing anything:
+  ```sh
+  gh label list -R <org>/<repo> --limit 100
+  # for each missing name in: audit adversarial
+  gh label create audit       -R <org>/<repo> --color 5319E7 --description "Audit finding"
+  gh label create adversarial -R <org>/<repo> --color A371F7 --description "Adversarial mutation-test finding"
+  ```
+- **Never recover from a label error by filing the issue unlabelled.** Dropping the label turns a loud failure into a silent one: the issue exists, reads fine, and is counted by nothing. If a label genuinely cannot be created (no permission), STOP and tell the user rather than filing unlabelled.
+- **Issue shape:** Title = the violated behavior in one line (what is wrong and where — not "investigate X"); Labels = **`audit`** (required — the countable one) **plus `adversarial`** (provenance, so this skill's findings stay distinguishable from the audit skill's while both stay countable); Body = the unit, the intent oracle the expected behavior was derived from, the violated property, the verified repro, and the neutral triage framing of step 5 above — why it might or might not be intended. You are surfacing a candidate, not adjudicating it.
+- **Verify the labels landed.** After filing, re-list (`gh issue list -R <org>/<repo> --label audit --state open`) and confirm every issue you just created is returned. An issue created while its label was missing is silently label-less, so a `gh issue create` that printed a URL is not proof; if any are missing, add the labels now (`gh issue edit <n> --add-label audit,adversarial`).
+- **Record the filed issue numbers** in `summary.filed` of the committed scan record (see below) and in PROGRESS.md, so the run's own record and the org health graph tell the same story.
 
 ## Mutation catalog (break ONE behavior)
 
@@ -155,7 +172,7 @@ At the END of a run, commit a **minimal, machine-readable** record so an org-wid
     "publishedTag": "v1.2.3",                       // the published/release version AT that commit, or null if unreleased
     "commitsAheadOfTag": 0,                         // how far the scanned commit is past that tag
     "scope": "whole repo",                          // or the module scoped
-    "tool": "adversarial-mutation-test", "skillVersion": "0.26.0",
+    "tool": "adversarial-mutation-test", "skillVersion": "0.28.0",
     "summary": { "behaviours": 600, "candidates": 89, "confirmed": 30, "filed": ["#2651","#2660"] }
   }
   ```
@@ -184,4 +201,5 @@ At the END of a run, commit a **minimal, machine-readable** record so an org-wid
 - **A passing test is not a correct behavior — coverage ≠ correctness.** A test killing a mutant only proves the test and the code agree, and tests routinely mirror the implementation (assert the code's own output / recompute with the same formula), so a green test can faithfully enshrine a bug. Run the correctness check on covered behaviors too; treat a test whose expected values look derived from the code as a red flag and re-derive them independently from the spec. "An existing test covers it" is never validation, and never a reason to skip adversarial scrutiny.
 - **Question the oracle — adversarial, not just mutation.** Mutation testing makes the code the oracle and can only find test gaps; it CANNOT find a bug, because it pins whatever the code does. The "adversarial" half makes the *spec/intent* the oracle and the code suspect: derive the expected value/property independently and hunt for inputs where the code violates it. A run that only adds passing tests and reports "no bugs" did half the job — say so honestly rather than calling the absence "expected". Every exact-value assertion is a chance to check the value against intent, not just against the code's output.
 - **Exhaust, don't sample — loop until dry.** Probe *every* behavior of a unit, then re-survey for the ones you missed; stop only when a full pass surfaces no new gap. A single pass over the high-value subset is a coverage *sample*, not coverage. A large or expensive-to-probe unit (e.g. one whose tests run etched/regenerated bytecode) gets paced and resumed — never truncated, and never declared done on the strength of "it looked well-tested already".
+- **Every filed finding is labelled `audit` — create the labels before filing, never file unlabelled.** The org health graph counts a repo's outstanding findings by `--label audit`, so an unlabelled finding is invisible and effectively does not exist (`rain.solmem` filed three and the graph read zero). `gh issue create --label` hard-fails on a label the repo lacks, so create `audit` (+ `adversarial` for provenance) up front, and re-list after filing to confirm they stuck. A label that cannot be created is a STOP-and-report, never a reason to file bare.
 - **End with a committed scan record.** Every run closes by appending an entry to a committed `audit/mutation-test-scans.json` (timestamp, scanned commit, published tag, scope, summary) and landing it on the default branch — even a clean run — so org-wide health tracking can distinguish recently-scanned repos from stale ones and know which release was audited.
