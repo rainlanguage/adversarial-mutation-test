@@ -566,6 +566,14 @@ mod tests {
     }
 
     #[test]
+    fn failing_tally_kills_even_when_the_exit_code_lies() {
+        // A wrapper that swallows the suite's exit code must not launder a failure:
+        // the tally is the suite's own word, and it says something failed.
+        let out = classify_suite("5 passed | 1 failed", true, &proof());
+        assert!(matches!(mutant_verdict(out, None), Verdict::Killed { .. }));
+    }
+
+    #[test]
     fn nonzero_exit_with_proof_kills_even_at_zero_failed_tally() {
         // deno prints its tally and then exits 1 on a failing permission/sanitizer step;
         // the suite declared failure, so the mutant is caught.
