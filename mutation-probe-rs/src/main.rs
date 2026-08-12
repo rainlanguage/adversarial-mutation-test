@@ -209,10 +209,15 @@ fn baseline_defect(outcome: &SuiteOutcome) -> Option<String> {
             exit_ok,
             ..
         } => {
-            if *failed > 0 || !*exit_ok {
+            if *failed > 0 {
                 Some(format!(
                     "baseline is RED ({failed} failed) — fix the suite before probing"
                 ))
+            } else if !*exit_ok {
+                Some(
+                    "baseline is RED (green tally but non-zero exit) — fix the suite before probing"
+                        .to_string(),
+                )
             } else if *passed == 0 {
                 Some("baseline ran 0 tests — nothing can kill anything".to_string())
             } else {
@@ -243,31 +248,74 @@ fn tail(s: &str, n: usize) -> String {
 
 // ---------------------------------------------------------------- running ----
 
+/// Per-stream capture cap. The TAIL is kept: tallies and failure lists live at the
+/// end of suite output, and a mutant that makes the suite log in a loop must cost
+/// memory O(cap), not O(output).
+const CAPTURE_CAP: usize = 4 * 1024 * 1024;
+
+/// Write via temp-file + rename in the target's own directory: rename is atomic on a
+/// same-filesystem move, so the target is always either its old or its new content —
+/// never truncated by a failed write.
+fn write_atomic(path: &std::path::Path, content: &str) -> Result<(), String> {
+    let tmp = path.with_extension("mutation-probe.tmp");
+    std::fs::write(&tmp, content).map_err(|e| format!("writing {}: {e}", tmp.display()))?;
+    std::fs::rename(&tmp, path).map_err(|e| format!("renaming over {}: {e}", path.display()))
+}
+
+/// Drain a pipe keeping at most the last `cap` bytes.
+fn drain_capped(mut r: impl Read, cap: usize) -> Vec<u8> {
+    let mut buf = Vec::new();
+    let mut chunk = [0u8; 65536];
+    loop {
+        match r.read(&mut chunk) {
+            Ok(0) => break,
+            Ok(n) => {
+                buf.extend_from_slice(&chunk[..n]);
+                if buf.len() > cap.saturating_mul(2) {
+                    buf.drain(..buf.len() - cap);
+                }
+            }
+            Err(_) => break,
+        }
+    }
+    if buf.len() > cap {
+        buf.drain(..buf.len() - cap);
+    }
+    buf
+}
+
 /// Run the suite once: piped output drained on threads (a full pipe would deadlock a
 /// chatty suite), wall clock enforced by poll + kill.
-fn run_suite(cfg: &SuiteConfig, root: &std::path::Path) -> Result<SuiteOutcome, String> {
+///
+/// The suite runs in its OWN PROCESS GROUP, and timeout kills the group: killing only
+/// the direct child (`sh`, `nix develop`) leaves descendants holding the output pipes,
+/// and the reader joins below would block forever on a suite that hung past its wrapper.
+fn run_suite(
+    cfg: &SuiteConfig,
+    root: &std::path::Path,
+    proof: &regex::Regex,
+) -> Result<SuiteOutcome, String> {
     let (program, args) = cfg.command.split_first().ok_or("suite.command is empty")?;
-    let mut child = std::process::Command::new(program)
+    let mut command = std::process::Command::new(program);
+    command
         .args(args)
         .current_dir(root)
         .stdin(Stdio::null())
         .stdout(Stdio::piped())
-        .stderr(Stdio::piped())
+        .stderr(Stdio::piped());
+    #[cfg(unix)]
+    {
+        use std::os::unix::process::CommandExt;
+        command.process_group(0);
+    }
+    let mut child = command
         .spawn()
         .map_err(|e| format!("cannot spawn suite {program:?}: {e}"))?;
 
-    let mut stdout = child.stdout.take().expect("stdout was piped");
-    let mut stderr = child.stderr.take().expect("stderr was piped");
-    let out_thread = std::thread::spawn(move || {
-        let mut buf = Vec::new();
-        let _ = stdout.read_to_end(&mut buf);
-        buf
-    });
-    let err_thread = std::thread::spawn(move || {
-        let mut buf = Vec::new();
-        let _ = stderr.read_to_end(&mut buf);
-        buf
-    });
+    let stdout = child.stdout.take().expect("stdout was piped");
+    let stderr = child.stderr.take().expect("stderr was piped");
+    let out_thread = std::thread::spawn(move || drain_capped(stdout, CAPTURE_CAP));
+    let err_thread = std::thread::spawn(move || drain_capped(stderr, CAPTURE_CAP));
 
     let deadline = Instant::now() + Duration::from_secs(cfg.timeout_secs);
     let status = loop {
@@ -275,6 +323,12 @@ fn run_suite(cfg: &SuiteConfig, root: &std::path::Path) -> Result<SuiteOutcome, 
             Ok(Some(status)) => break Some(status),
             Ok(None) => {
                 if Instant::now() >= deadline {
+                    #[cfg(unix)]
+                    // SAFETY: plain syscall on the pgid this process created above.
+                    unsafe {
+                        libc::killpg(child.id() as libc::pid_t, libc::SIGKILL);
+                    }
+                    #[cfg(not(unix))]
                     let _ = child.kill();
                     let _ = child.wait();
                     break None;
@@ -297,8 +351,7 @@ fn run_suite(cfg: &SuiteConfig, root: &std::path::Path) -> Result<SuiteOutcome, 
         String::from_utf8_lossy(&out),
         String::from_utf8_lossy(&err)
     );
-    let proof = regex::Regex::new(&cfg.proof).expect("proof validated at load");
-    Ok(classify_suite(&combined, status.success(), &proof))
+    Ok(classify_suite(&combined, status.success(), proof))
 }
 
 // ----------------------------------------------------------------- report ----
@@ -339,6 +392,61 @@ fn fail(msg: &str) -> ! {
     std::process::exit(2);
 }
 
+/// The manual lives here (and in the repo README), NOT in the skill text: skill prose
+/// is a recurring per-invocation context cost, while --help is read on demand.
+const HELP: &str = r#"mutation-probe — apply exact-string mutants, prove the suite ran, score honestly.
+
+USAGE
+    mutation-probe <mutants.toml> [--json <path>] [--only <substring>]
+
+    --json <path>       also write the machine-readable report
+    --only <substring>  probe only mutants whose name contains the substring
+                        (substring match — a broad value selects several)
+    --help, -h          this manual
+
+MUTANTS FILE (TOML)
+    [suite]
+    root = "."                    # repo the suite runs in, relative to this file
+    command = ["sh", "check.sh"]  # argv, no shell. Include any artifact regeneration
+                                  # here (wrapper script is fine): the probe runs
+                                  # exactly this per verdict, and a suite that tests
+                                  # stale artifacts is the #1 way a matrix lies.
+    proof = '(\d+) passed; (\d+) failed'
+                                  # 2 capture groups: passed, failed — read from the
+                                  # suite's own tally. Multiple matches SUM (cargo
+                                  # prints one line per test binary). No match =
+                                  # the suite did not provably run.
+    fail-pattern = 'test (\S+) \.\.\. FAILED'   # optional: 1 group naming a killer
+    timeout-secs = 1800           # optional; the suite's process group is killed
+
+    [[mutants]]
+    name = "M01 guard inverted"
+    file = "src/lib.rs"           # relative to root
+    target = "if !ok {"           # must occur EXACTLY once in the file
+    replacement = "if ok {"
+
+VERDICTS
+    KILLED         suite ran and failed (failing tally, or non-zero exit with proof
+                   present — the tally is trusted over a lying wrapper exit code,
+                   and vice versa)
+    SURVIVED       suite ran green: a real coverage gap
+    NO-RUN         no proof the suite ran (crash / compile error / timeout) —
+                   unscorable, never "survived"
+    HARNESS-ERROR  the mutant is invalid: target not found exactly once
+
+INTEGRITY (enforced)
+    A red, silent, or zero-test baseline aborts before any probe. Writes are
+    atomic (temp + rename): no failure mode leaves a file truncated. Every
+    restore is verified byte-exact, and each file is re-checked pristine before
+    the next mutant. Suite output is capped per stream (oldest bytes dropped).
+
+EXIT CODES
+    0  baseline green and every probed mutant KILLED
+    1  the pass ran; something SURVIVED, was NO-RUN, or was a HARNESS-ERROR
+    2  the pass could not run or be trusted (config error, red baseline,
+       restore failure)
+"#;
+
 fn main() {
     let mut args = std::env::args().skip(1);
     let mut config_path: Option<String> = None;
@@ -346,6 +454,10 @@ fn main() {
     let mut only: Option<String> = None;
     while let Some(a) = args.next() {
         match a.as_str() {
+            "--help" | "-h" => {
+                print!("{HELP}");
+                std::process::exit(0);
+            }
             "--json" => {
                 json_path = Some(args.next().unwrap_or_else(|| fail("--json needs a path")))
             }
@@ -355,12 +467,14 @@ fn main() {
                         .unwrap_or_else(|| fail("--only needs a substring")),
                 )
             }
+            // A misspelled flag must not silently become the config path.
+            other if other.starts_with('-') => fail(&format!("unknown flag {other:?} (--help)")),
             _ if config_path.is_none() => config_path = Some(a),
             other => fail(&format!("unexpected argument {other:?}")),
         }
     }
     let config_path = config_path.unwrap_or_else(|| {
-        fail("usage: mutation-probe <mutants.toml> [--json <path>] [--only <substring>]")
+        fail("usage: mutation-probe <mutants.toml> [--json <path>] [--only <substring>] (--help for the manual)")
     });
 
     let raw = std::fs::read_to_string(&config_path)
@@ -418,7 +532,7 @@ fn main() {
 
     // Baseline: the suite must prove itself green on the unmutated tree first.
     println!("baseline: running suite ...");
-    let baseline = run_suite(&cfg.suite, &root).unwrap_or_else(|e| fail(&e));
+    let baseline = run_suite(&cfg.suite, &root, &proof).unwrap_or_else(|e| fail(&e));
     if let Some(defect) = baseline_defect(&baseline) {
         fail(&defect);
     }
@@ -452,12 +566,15 @@ fn main() {
                 };
             }
             let mutated = original.replacen(m.target.as_str(), &m.replacement, 1);
-            std::fs::write(&path, &mutated)
+            // Atomic (temp + rename) in both directions: a plain fs::write truncates
+            // first, so a failure mid-write (ENOSPC, EIO) would leave the file
+            // truncated with nothing to restore from on disk.
+            write_atomic(&path, &mutated)
                 .unwrap_or_else(|e| fail(&format!("cannot write mutant to {}: {e}", m.file)));
-            let outcome = run_suite(&cfg.suite, &root);
+            let outcome = run_suite(&cfg.suite, &root, &proof);
             // Restore before anything can early-return, then verify byte-exact: a tree
             // left mutated poisons every later probe and the working copy itself.
-            std::fs::write(&path, original).unwrap_or_else(|e| {
+            write_atomic(&path, original).unwrap_or_else(|e| {
                 fail(&format!(
                     "RESTORE FAILED for {}: {e} — tree is dirty",
                     m.file
@@ -681,6 +798,45 @@ mod tests {
             unknown.is_err(),
             "an unknown key must be a loud config error"
         );
+    }
+
+    #[test]
+    fn red_baseline_names_the_actual_defect() {
+        let tally_red = classify_suite("3 passed | 1 failed", false, &proof());
+        assert!(baseline_defect(&tally_red).unwrap().contains("1 failed"));
+        let exit_red = classify_suite("3 passed | 0 failed", false, &proof());
+        assert!(baseline_defect(&exit_red)
+            .unwrap()
+            .contains("green tally but non-zero exit"));
+    }
+
+    #[test]
+    fn capped_drain_keeps_the_tail() {
+        let data: Vec<u8> = (0..100_000u32).flat_map(|i| i.to_le_bytes()).collect();
+        let out = drain_capped(std::io::Cursor::new(data.clone()), 1024);
+        assert_eq!(out.len(), 1024);
+        assert_eq!(
+            out[..],
+            data[data.len() - 1024..],
+            "the TAIL survives the cap"
+        );
+        let small = drain_capped(std::io::Cursor::new(b"abc".to_vec()), 1024);
+        assert_eq!(small, b"abc");
+    }
+
+    #[test]
+    fn atomic_write_replaces_content_and_leaves_no_temp() {
+        let dir = std::env::temp_dir().join(format!("mp-atomic-{}", std::process::id()));
+        std::fs::create_dir_all(&dir).unwrap();
+        let target = dir.join("f.txt");
+        std::fs::write(&target, "old").unwrap();
+        write_atomic(&target, "new").unwrap();
+        assert_eq!(std::fs::read_to_string(&target).unwrap(), "new");
+        assert!(
+            !target.with_extension("mutation-probe.tmp").exists(),
+            "the temp file is consumed by the rename"
+        );
+        let _ = std::fs::remove_dir_all(&dir);
     }
 
     #[test]

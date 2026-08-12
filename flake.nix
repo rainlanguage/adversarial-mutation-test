@@ -36,7 +36,9 @@
         # wrapper. Consumers: `nix run github:rainlanguage/adversarial-mutation-test#mutation-probe -- mutants.toml`.
         mutation-probe = pkgs.rustPlatform.buildRustPackage {
           pname = "mutation-probe";
-          version = "0.1.0";
+          # From the manifest, so the two cannot drift.
+          inherit ((lib.importTOML ./mutation-probe-rs/Cargo.toml).package) version;
+          meta.mainProgram = "mutation-probe";
           inherit src;
           cargoLock.lockFile = ./Cargo.lock;
         };

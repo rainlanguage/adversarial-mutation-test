@@ -80,14 +80,64 @@ later probes).
 nix run github:rainlanguage/adversarial-mutation-test#mutation-probe -- mutants.toml
 ```
 
-The mutants file names the suite command (artifact regeneration included), a
-proof-of-run regex that reads the suite's own pass/fail tally, and the mutants
-as exact-string `(file, target, replacement)` triples that must match exactly
-once. Verdicts: `KILLED` / `SURVIVED` / `NO-RUN` (no proof the suite ran — never
-scored as survived) / `HARNESS-ERROR` (invalid mutant). A red, silent, or
-zero-test baseline aborts the pass; every restore is verified byte-exact. Exit 0
-only when every probed mutant is killed. See the probe-harness section of
-[`SKILL.md`](skills/adversarial-mutation-test/SKILL.md) for the file format.
+`mutation-probe --help` is the complete manual. The short form: the mutants file
+names the suite command as argv (artifact regeneration included — the probe runs
+exactly that per verdict), a proof-of-run regex reading the suite's own
+pass/fail tally, and the mutants as exact-string `(file, target, replacement)`
+triples that must match exactly once.
+
+```toml
+[suite]
+root = "."
+command = ["nix", "develop", "-c", "cargo", "test"]
+proof = '(\d+) passed; (\d+) failed'
+fail-pattern = 'test (\S+) \.\.\. FAILED'   # optional: names the killer
+timeout-secs = 1800                          # optional
+
+[[mutants]]
+name = "M01 guard inverted"
+file = "src/lib.rs"
+target = "if !ok {"
+replacement = "if ok {"
+```
+
+Verdicts: `KILLED` (failing tally, or non-zero exit with proof of a run) /
+`SURVIVED` (ran green: a real gap) / `NO-RUN` (no proof the suite ran — crash,
+compile error, timeout — never scored as survived) / `HARNESS-ERROR` (target not
+matched exactly once). A red, silent, or zero-test baseline aborts before any
+probe; writes are atomic and every restore is verified byte-exact; a hung
+suite's whole process group is killed at `timeout-secs`. Exit 0 only when every
+probed mutant is killed; 1 on any non-kill; 2 when the pass cannot be trusted.
+`--only <substring>` re-runs a subset while strengthening a killer;
+`--json <path>` writes the machine-readable report.
+
+## Scan record template
+
+Campaigns close by appending one entry per run to a committed
+`audit/mutation-test-scans.json` on the default branch (see SKILL.md). Valid
+JSON, no comments:
+
+```json
+{
+  "timestamp": "2026-08-12T19:40:00Z",
+  "commit": "08d547fdeadbeef",
+  "publishedTag": "v1.2.3",
+  "commitsAheadOfTag": 0,
+  "scope": "whole repo",
+  "tool": "adversarial-mutation-test",
+  "skillVersion": "0.31.0",
+  "summary": {
+    "behaviours": 600,
+    "candidates": 89,
+    "confirmed": 30,
+    "filed": ["#2651", "#2660"]
+  }
+}
+```
+
+`timestamp` is UTC at run end; `commit` the exact SHA scanned; `publishedTag`
+the release at that commit (null if unreleased) with `commitsAheadOfTag` its
+distance. Those three are the must-haves; `summary` is nice-to-have.
 
 ## License
 

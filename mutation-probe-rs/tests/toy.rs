@@ -186,6 +186,89 @@ fn crashed_baseline_aborts_as_no_proof() {
 }
 
 #[test]
+fn hung_suite_times_out_as_no_run_and_restores() {
+    // The mutant makes the suite sleep far past timeout-secs; sh's CHILD (sleep)
+    // holds the output pipes, so this also proves the process-group kill — with a
+    // child-only kill the probe would hang on the pipe readers, not finish.
+    let dir = unique_dir("timeout");
+    let code = "GUARD on\nCAP 10\nMODE strict\n";
+    std::fs::create_dir_all(&dir).unwrap();
+    std::fs::write(dir.join("code.txt"), code).unwrap();
+    std::fs::write(
+        dir.join("check.sh"),
+        "if grep -q SLOW code.txt; then sleep 600; fi\n".to_string() + CHECK_SH,
+    )
+    .unwrap();
+    let config = r#"
+[suite]
+root = "."
+command = ["sh", "check.sh"]
+proof = '(\d+) passed \| (\d+) failed'
+timeout-secs = 2
+
+[[mutants]]
+name = "M-hang the suite sleeps forever"
+file = "code.txt"
+target = "MODE strict"
+replacement = "SLOW"
+"#;
+    let config_path = dir.join("mutants.toml");
+    std::fs::write(&config_path, config).unwrap();
+    let started = std::time::Instant::now();
+    let (exit, out, report) = run(&config_path, &[]);
+    assert!(
+        started.elapsed() < std::time::Duration::from_secs(60),
+        "the probe must not hang on the hung suite's pipes"
+    );
+    assert_eq!(exit, 1, "a NO-RUN is a non-kill; output:\n{out}");
+    assert_eq!(report["mutants"][0]["verdict"].as_str(), Some("NO-RUN"));
+    assert!(
+        report["mutants"][0]["detail"]
+            .as_str()
+            .unwrap()
+            .contains("timed out"),
+        "the detail names the timeout"
+    );
+    assert_eq!(
+        std::fs::read_to_string(dir.join("code.txt")).unwrap(),
+        code,
+        "restored despite the timeout"
+    );
+    let _ = std::fs::remove_dir_all(&dir);
+}
+
+#[test]
+fn failing_tally_with_zero_exit_still_kills() {
+    // A wrapper that swallows the suite's exit code must not launder a failure the
+    // suite's own tally reports — end-to-end twin of the unit test.
+    let dir = unique_dir("liar");
+    let code = "GUARD on\nCAP 10\nMODE strict\n";
+    std::fs::create_dir_all(&dir).unwrap();
+    std::fs::write(dir.join("code.txt"), code).unwrap();
+    // Same suite, but the final failure-propagating line is replaced with exit 0.
+    let swallowing = CHECK_SH.replace("[ \"$f\" -eq 0 ] || exit 1", "exit 0");
+    assert_ne!(
+        swallowing, CHECK_SH,
+        "the exit-propagation line must exist to be swallowed"
+    );
+    std::fs::write(dir.join("check.sh"), swallowing).unwrap();
+    let config = write_config(
+        &dir,
+        r#"
+[[mutants]]
+name = "M-kill guard off"
+file = "code.txt"
+target = "GUARD on"
+replacement = "GUARD off"
+"#,
+    );
+    let (exit, out, report) = run(&config, &[]);
+    assert_eq!(exit, 0, "killed via the tally alone; output:\n{out}");
+    assert_eq!(report["mutants"][0]["verdict"].as_str(), Some("KILLED"));
+    let _ = std::fs::remove_dir_all(&dir);
+}
+
+#[test]
 fn only_filter_narrows_the_pass() {
     let dir = unique_dir("only");
     let code = "GUARD on\nCAP 10\nMODE strict\n";
