@@ -12,7 +12,7 @@
       system:
       let
         pkgs = import nixpkgs { inherit system; };
-        lib = pkgs.lib;
+        inherit (pkgs) lib;
         # The crate is a workspace member, so the Cargo.lock lives at the repo
         # root. buildRustPackage needs the lock inside src, so src is the
         # workspace root — filtered to just the manifests + crate. Without the
@@ -28,9 +28,7 @@
             ./LICENSE
             # Subtract rather than whitelist src/: a whitelist silently drops
             # anything the crate gains later (tests/, benches/, build.rs).
-            (lib.fileset.difference ./mutation-probe-rs (
-              lib.fileset.maybeMissing ./mutation-probe-rs/target
-            ))
+            (lib.fileset.difference ./mutation-probe-rs (lib.fileset.maybeMissing ./mutation-probe-rs/target))
           ];
         };
         # The probe harness the skill's mutation passes run. Tests run in-build
