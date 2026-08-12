@@ -67,6 +67,26 @@ the eventualities".
 See [`skills/adversarial-mutation-test/SKILL.md`](skills/adversarial-mutation-test/SKILL.md)
 for the full method.
 
+## The probe harness (`mutation-probe`)
+
+The mutate → run → score → restore machinery is a tested Rust bin shipped by this
+repo's nix flake — campaigns author mutants declaratively and never hand-roll the
+harness (hand-rolls kept faking matrices: zero-match mutants scored as survived,
+crashed suites scored at all, imperfect restores poisoning later probes).
+
+```sh
+nix run github:rainlanguage/adversarial-mutation-test#mutation-probe -- mutants.toml
+```
+
+The mutants file names the suite command (artifact regeneration included), a
+proof-of-run regex that reads the suite's own pass/fail tally, and the mutants as
+exact-string `(file, target, replacement)` triples that must match exactly once.
+Verdicts: `KILLED` / `SURVIVED` / `NO-RUN` (no proof the suite ran — never scored
+as survived) / `HARNESS-ERROR` (invalid mutant). A red, silent, or zero-test
+baseline aborts the pass; every restore is verified byte-exact. Exit 0 only when
+every probed mutant is killed. See the probe-harness section of
+[`SKILL.md`](skills/adversarial-mutation-test/SKILL.md) for the file format.
+
 ## License
 
 [DecentraLicense 1.0](LICENSE) (`LicenseRef-DCL-1.0`).

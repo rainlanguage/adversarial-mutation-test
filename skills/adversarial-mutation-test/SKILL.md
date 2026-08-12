@@ -1,7 +1,7 @@
 ---
 name: adversarial-mutation-test
 description: Use to systematically find BUGS in and harden the test suite for a WHOLE repository (or a whole module of it). Two co-equal goals the name carries: ADVERSARIAL (treat spec/intent as the oracle and the code as suspect — derive expected behavior independently and hunt for inputs where the code is wrong) and MUTATION (prove tests cover the code). Mutation-drives a behavior-centric coverage ledger — for each behavior, break the line and check the whole suite: existing tests that kill the mutant are validated and logged (so existing coverage is audited and in scope), and only surviving mutants (real gaps) get a new discriminating test. An existing test that already kills mutants is left as-is; one meant to cover a behavior but that a mutant survives is strengthened in place (not duplicated); one broken on the unmutated baseline is fixed or its underlying code bug surfaced; a test is never edited to swallow a mutation. Designed for long campaigns that outlive the context window: progress lives in a durable gitignored scratch file so it survives compaction. A single change/PR/function is just a narrowed scope. Triggers on "test the whole repo", "harden the test suite", "mutation test the codebase", "audit the tests", "adversarial tests", "prove these tests cover the code", "exhaust the eventualities".
-version: 0.30.0
+version: 0.31.0
 ---
 
 # Adversarial Mutation Testing (whole-repo, resumable)
@@ -127,6 +127,66 @@ Findings are tracked as **GitHub issues** — the durable product record, and th
 
 Pick the mutation that maps to exactly one behavior so the failing-test set is diagnostic.
 
+## The probe harness (`mutation-probe` — bundled tool, not a hand-roll)
+
+The probe machinery — apply a mutant, run the suite, score the reaction, restore — is a
+tested Rust bin shipped by this repo's nix flake. Do NOT hand-roll a per-campaign
+mutate/run/restore script: every integrity rule the hand-rolls kept getting wrong (a
+zero-match "mutation" scored as survived, an unproven run scored at all, a red baseline
+probed, an imperfect restore poisoning later probes) is enforced by the bin. You author
+the mutants adversarially; the bin scores them.
+
+```sh
+nix run github:rainlanguage/adversarial-mutation-test#mutation-probe -- mutants.toml
+# machine-readable report + a single-mutant re-run while strengthening its killer:
+nix run github:rainlanguage/adversarial-mutation-test#mutation-probe -- mutants.toml --json report.json --only M07
+```
+
+The mutants file (TOML):
+
+```toml
+[suite]
+root = "."                                  # repo the suite runs in, relative to this file
+command = ["nix", "develop", "-c", "cargo", "test"]
+                                            # argv, no shell. INCLUDE any artifact
+                                            # regeneration in this command (a wrapper
+                                            # script is fine): the probe runs exactly this
+                                            # per verdict, and a suite that tests stale
+                                            # artifacts is the #1 way a matrix lies.
+proof = '(\d+) passed; (\d+) failed'        # 2 capture groups: passed, failed. Multiple
+                                            # matches SUM (cargo prints one line per test
+                                            # binary). No match = the suite did not
+                                            # provably run.
+fail-pattern = 'test (\S+) \.\.\. FAILED'   # optional: 1 group naming a failing test,
+                                            # reported as the mutant's killer
+timeout-secs = 1800                         # optional, default 1800
+
+[[mutants]]
+name = "M01 guard inverted"
+file = "src/lib.rs"                          # relative to root
+target = "if !status.mounted {"              # must occur EXACTLY once in the file
+replacement = "if status.mounted {"
+```
+
+Verdicts: **KILLED** (suite ran and failed — the tally shows failures, or the harness
+exited non-zero having proven it ran), **SURVIVED** (suite ran green: a real gap),
+**NO-RUN** (no proof-of-run: crash / compile error / timeout — unscorable, never
+"survived"), **HARNESS-ERROR** (the mutant is invalid: target not found exactly once).
+Exit 0 only when every probed mutant is KILLED; 1 when anything survived or could not
+score; 2 when the pass itself cannot be trusted (unreadable config, baseline not green,
+baseline ran zero tests, restore not byte-exact — the bin aborts rather than continue on
+a tree it cannot vouch for).
+
+Still YOURS to uphold — the bin cannot see these:
+- **Commit (or pin) the suite before the first probe.** The bin restores from its own
+  in-memory copy, but committed state is what makes the whole pass auditable and
+  recoverable if the bin is killed mid-probe.
+- **Keep targets out of the oracle.** A target string sitting in test code co-mutates the
+  expectation and voids the probe; exactly-once matching cannot know which side of the
+  oracle a string lives on. Point every mutant at code, never at a test's expected value.
+- **Derive mutants from the spec, not the diff hunks** — the adversarial half stays with
+  you; the bin only guarantees the scoring is honest.
+
 ## Parallelizing across groups (the native fan-out)
 
 Groups are independent (separate branch, additive test-only PR), so fan them out with the native Workflow: one `agent()` per group, collected with `parallel(thunks)` (a barrier — you want every group's ledger together to aggregate) or `pipeline(groups, …)` for per-item flow. Each worker runs its group's per-unit loop, then commits, pushes, and opens its own PR. Let the runtime own the mechanics:
@@ -188,11 +248,11 @@ At the END of a run, commit a **minimal, machine-readable** record so an org-wid
 - **Discriminating assertions** — "got 3, expected 1" beats "it reverted".
 - **One mutation, one behavior** — isolation makes the failing set identify the covered line.
 - **Confirm the mutation is live** — stale artifacts are the #1 way this lies to you.
-- **Harden the probe harness itself — a lying harness fakes the whole campaign.** Four integrity rules, each from a real incident where the matrix was silently wrong:
-  - **Commit (or pin) the suite BEFORE the first probe.** Restore-via-VCS restores committed state; when the new tests share a file with the mutated source (e.g. a Rust in-file `#[cfg(test)]` module) and are uncommitted, the first restore WIPES them — every later probe runs testless and reports universal survival.
-  - **Assert the baseline count before probing.** The harness must run the clean tree first and abort unless it sees the expected `N passed`; "0 tests ran" must be a loud failure, never a silent "everything survived".
-  - **Classify probe outcomes from the test harness's own result line, not by grepping for "error".** `cargo test` prints `error: test failed` on every KILL — a naive error-grep reclassifies kills as compile failures. Harness-ran (result line present) → killed/survived from the failing-test list; result line absent → the mutation was invalid.
-  - **Scope automated mutations away from the oracle.** A whole-file sed can rewrite the test module's expected values in lockstep with the code (same literal in both) — the mutant then "survives" against a co-mutated oracle. Restrict the mutation to the code region (address range above `#[cfg(test)]`, exclude test dirs), and treat a survival whose diff touched test code as void.
+- **Run probes through the bundled `mutation-probe` bin — a lying harness fakes the whole campaign.** Four integrity rules, each from a real incident where a hand-rolled harness silently faked the matrix; the middle two are now ENFORCED by the bin (see "The probe harness" above), the first and last remain yours:
+  - **Commit (or pin) the suite BEFORE the first probe.** (Yours.) Committed state is the auditable recovery point if the pass is killed mid-probe; historically, uncommitted in-file tests were WIPED by a VCS restore and every later probe ran testless.
+  - **Assert the baseline count before probing.** (Enforced: the bin aborts on a red, silent, or zero-test baseline.) "0 tests ran" must be a loud failure, never a silent "everything survived".
+  - **Classify probe outcomes from the test harness's own result line, not by grepping for "error".** (Enforced: the bin's proof-of-run regex reads the suite's own tally; no proof → NO-RUN, never a score.) `cargo test` prints `error: test failed` on every KILL — a naive error-grep reclassifies kills as compile failures.
+  - **Scope mutations away from the oracle.** (Yours.) A target inside test code co-mutates the expected values in lockstep with the code — the mutant then "survives" against a co-mutated oracle. Point every mutant at the code region, and treat a survival whose target touched test code as void.
 - **Durable state, not conversation memory** — committed tests/issues are the durable record of WORK; PROGRESS.md is the authoritative HUMAN/audit narrative; under a Workflow, run-time resume and convergence are owned natively (the run journal / `resumeFromRunId` + cached agent results + orchestrator loop state), not by PROGRESS.md.
 - **Always restore** mutations via VCS; verify a clean tree before committing tests.
 - **Comments describe behavior, not the mutation process.**
