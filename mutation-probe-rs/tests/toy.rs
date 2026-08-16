@@ -70,7 +70,13 @@ fn run(config: &Path, extra: &[&str]) -> (i32, String, serde_json::Value) {
 
 /// Prefix that makes the suite hang while `SLOW` is in the code — used to hold a probe
 /// at a chosen phase long enough to kill it there, the way an agent's death leaves one.
-const SLOW_PREFIX: &str = "if grep -q SLOW code.txt; then sleep 300; fi\n";
+///
+/// It also logs, per suite invocation, whether the tree was locked AT THAT MOMENT: the
+/// lock has to be held for the whole pass, because a racing probe arrives while the
+/// suite is running, not at the tidy moments either side of it.
+const SLOW_PREFIX: &str = "if grep -q SLOW code.txt; then sleep 300; fi\n\
+     if [ -f .mutation-test/probe.lock ]; then grep -h '^pid' .mutation-test/probe.lock \
+     >> lock-seen.log; else echo MISSING >> lock-seen.log; fi\n";
 
 fn toy_hangs_on_slow(dir: &Path, code: &str) {
     std::fs::create_dir_all(dir).unwrap();
@@ -411,6 +417,12 @@ fn a_stale_lock_from_a_probe_that_died_at_the_baseline_is_reclaimed() {
     );
     assert_eq!(report["summary"]["killed"].as_u64(), Some(1));
     assert!(!lock_file(&dir).exists());
+    let seen = std::fs::read_to_string(dir.join("lock-seen.log")).unwrap();
+    assert!(
+        !seen.contains("MISSING"),
+        "the reclaimed lock is HELD for the pass — a reclaim that removes the stale lock \
+         without taking its place leaves the tree open to the next probe:\n{seen}"
+    );
     let _ = std::fs::remove_dir_all(&dir);
 }
 
