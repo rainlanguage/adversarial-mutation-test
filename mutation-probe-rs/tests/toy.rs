@@ -269,6 +269,153 @@ replacement = "GUARD off"
 }
 
 #[test]
+fn a_fail_pattern_matching_the_baseline_aborts_before_probing() {
+    // The toy suite prints `<name> ... ok` for passing tests, so a pattern that reads
+    // result lines without discriminating on the RESULT captures them at the green
+    // baseline — the shape of the incident, where `\] (test\w+)\(` matched forge's
+    // `[PASS]` lines. Nothing failed, so those captures can only be passing tests.
+    let dir = unique_dir("widepattern");
+    let code = "GUARD on\nCAP 10\nMODE strict\n";
+    toy(&dir, code);
+    let config = format!(
+        r#"
+[suite]
+root = "."
+command = ["sh", "check.sh"]
+proof = '(\d+) passed \| (\d+) failed'
+fail-pattern = '(\S+) \.\.\. '
+timeout-secs = 60
+{ALL_FOUR}
+"#
+    );
+    let path = dir.join("mutants.toml");
+    std::fs::write(&path, config).unwrap();
+    let (exit, out, report) = run(&path, &[]);
+    assert_eq!(
+        exit, 2,
+        "an unusable fail-pattern is an abort; output:\n{out}"
+    );
+    assert!(
+        out.contains("fail-pattern matches the GREEN baseline"),
+        "the abort names the fail-pattern:\n{out}"
+    );
+    assert!(
+        out.contains("guard_test") && out.contains("cap_test"),
+        "the abort shows what it captured at baseline:\n{out}"
+    );
+    assert_eq!(
+        report,
+        serde_json::Value::Null,
+        "no report on an aborted pass"
+    );
+    let _ = std::fs::remove_dir_all(&dir);
+}
+
+#[test]
+fn a_fail_pattern_that_names_nobody_says_so_per_kill() {
+    // The other direction: a pattern that matches nothing is invisible to the baseline
+    // check (it matches nothing there either) and leaves a KILLED row with no killer.
+    // The verdict is still read from the tally, so it stays correct.
+    let dir = unique_dir("silentpattern");
+    toy(&dir, "GUARD on\nCAP 10\nMODE strict\n");
+    let config = format!(
+        r#"
+[suite]
+root = "."
+command = ["sh", "check.sh"]
+proof = '(\d+) passed \| (\d+) failed'
+fail-pattern = 'NOTHING MATCHES (\w+)'
+timeout-secs = 60
+{}
+"#,
+        r#"
+[[mutants]]
+name = "M-kill guard off"
+file = "code.txt"
+target = "GUARD on"
+replacement = "GUARD off"
+"#
+    );
+    let path = dir.join("mutants.toml");
+    std::fs::write(&path, config).unwrap();
+    let (exit, out, report) = run(&path, &[]);
+    assert_eq!(exit, 0, "still a kill; output:\n{out}");
+    assert_eq!(report["mutants"][0]["verdict"].as_str(), Some("KILLED"));
+    assert!(
+        out.contains("killer NOT NAMED"),
+        "a blank killer column must announce itself:\n{out}"
+    );
+    let _ = std::fs::remove_dir_all(&dir);
+}
+
+#[test]
+fn a_named_harness_replaces_the_hand_written_patterns() {
+    // The toy suite emits cargo-shaped result lines, so `harness = "cargo"` alone —
+    // no proof, no fail-pattern — must drive a full pass and name the killer.
+    let dir = unique_dir("harness");
+    std::fs::create_dir_all(&dir).unwrap();
+    std::fs::write(dir.join("code.txt"), "GUARD on\nCAP 10\nMODE strict\n").unwrap();
+    std::fs::write(
+        dir.join("check.sh"),
+        r#"
+p=0; f=0
+if grep -q "GUARD on" code.txt; then echo "test guard_test ... ok"; p=$((p+1)); else echo "test guard_test ... FAILED"; f=$((f+1)); fi
+echo "test cap_test ... ok"; p=$((p+1))
+if [ "$f" -eq 0 ]; then r=ok; else r=FAILED; fi
+echo "test result: $r. $p passed; $f failed; 0 ignored; 0 measured; 0 filtered out; finished in 0.00s"
+[ "$f" -eq 0 ] || exit 101
+"#,
+    )
+    .unwrap();
+    let config = r#"
+[suite]
+harness = "cargo"
+root = "."
+command = ["sh", "check.sh"]
+timeout-secs = 60
+
+[[mutants]]
+name = "M-kill guard off"
+file = "code.txt"
+target = "GUARD on"
+replacement = "GUARD off"
+"#;
+    let path = dir.join("mutants.toml");
+    std::fs::write(&path, config).unwrap();
+    let (exit, out, report) = run(&path, &[]);
+    assert_eq!(exit, 0, "an all-killed pass exits 0; output:\n{out}");
+    assert_eq!(report["baseline"]["passed"].as_u64(), Some(2));
+    assert_eq!(
+        report["mutants"][0]["killed_by"][0].as_str(),
+        Some("guard_test"),
+        "the shipped cargo pattern names the killer; output:\n{out}"
+    );
+    let _ = std::fs::remove_dir_all(&dir);
+}
+
+#[test]
+fn an_unknown_harness_is_a_config_abort() {
+    let dir = unique_dir("badharness");
+    toy(&dir, "GUARD on\nCAP 10\nMODE strict\n");
+    let config = format!(
+        r#"
+[suite]
+harness = "pytest"
+root = "."
+command = ["sh", "check.sh"]
+timeout-secs = 60
+{ALL_FOUR}
+"#
+    );
+    let path = dir.join("mutants.toml");
+    std::fs::write(&path, config).unwrap();
+    let (exit, out, _) = run(&path, &[]);
+    assert_eq!(exit, 2, "output:\n{out}");
+    assert!(out.contains("pytest"), "the abort names the value:\n{out}");
+    let _ = std::fs::remove_dir_all(&dir);
+}
+
+#[test]
 fn only_filter_narrows_the_pass() {
     let dir = unique_dir("only");
     let code = "GUARD on\nCAP 10\nMODE strict\n";

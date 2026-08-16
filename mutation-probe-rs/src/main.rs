@@ -47,12 +47,21 @@ struct SuiteConfig {
     /// part of this command: the probe runs exactly one command per verdict, and a suite
     /// that tests stale artifacts is the #1 way a mutation matrix lies.
     command: Vec<String>,
+    /// Optional: name a shipped harness (`forge`, `cargo`) and its known-good `proof`
+    /// and `fail-pattern` are used. Both scrape a harness's OUTPUT FORMAT, which is a
+    /// property of the harness and not of any repo — so authoring them per campaign
+    /// re-derives the same two mistakes every time (see HARNESSES).
+    #[serde(default)]
+    harness: Option<String>,
     /// Proof-of-run regex over the suite's combined stdout+stderr. Needs two capture
     /// groups: passed count, failed count. Multiple matches sum (cargo prints one result
     /// line per test binary). No match anywhere = the suite did not provably run.
-    proof: String,
+    /// Required unless `harness` supplies it; given here it overrides the harness.
+    #[serde(default)]
+    proof: Option<String>,
     /// Optional: one capture group extracting a failing test's name, for `killedBy`.
-    #[serde(rename = "fail-pattern")]
+    /// Given here it overrides the harness's.
+    #[serde(rename = "fail-pattern", default)]
     fail_pattern: Option<String>,
     /// Per-run wall clock limit. A hung suite is NO-RUN, not a hung campaign.
     #[serde(rename = "timeout-secs", default = "default_timeout")]
@@ -61,6 +70,95 @@ struct SuiteConfig {
 
 fn default_timeout() -> u64 {
     1800
+}
+
+// -------------------------------------------------------------- harnesses ----
+
+/// A harness's own output format, scraped once here instead of per campaign.
+struct Harness {
+    name: &'static str,
+    proof: &'static str,
+    fail_pattern: &'static str,
+}
+
+/// Known-good patterns, each pinned by a test to REAL captured output of that harness
+/// (`fixtures/`), green and red.
+///
+/// `fail-pattern` is the field campaigns get wrong, in two ways that look nothing alike:
+///
+///  1. TOO WIDE. `'\] (test\w+)\('` against forge matches `[PASS] testFoo(` exactly as
+///     readily as `[FAIL: …] testFoo(`, so every mutant is "killed by" whichever passing
+///     tests happen to be printed — a killer column that is not evidence of anything.
+///     `fail_pattern_defect` now catches this class at baseline.
+///  2. TOO NARROW, AND SILENT. `'\[FAIL.*?\] (test\w+)\('` fixes (1) and then names
+///     nobody, because `.` does not match `\n` and forge puts multi-line assertion
+///     messages inside the brackets. The verdict stays correct (it is read from the
+///     tally, never from this pattern) while the killer column empties out.
+///
+/// `(?s)` is NOT the fix for (2): it lets a FAIL entry with no `] name(` shape of its
+/// own — forge's invariant failures print the name on a later line, after a `[Sequence]`
+/// block — run on into the NEXT entry and name that test instead. Trading a blank cell
+/// for a wrong one is the worse half of the trade, so these patterns stay line-anchored.
+const HARNESSES: &[Harness] = &[
+    Harness {
+        name: "forge",
+        // Per test CONTRACT, summed; the trailing per-run line ("3 tests passed, 6
+        // failed") is comma-shaped and deliberately not matched twice.
+        proof: r"(?m)^Suite result: \w+\. (\d+) passed; (\d+) failed;",
+        // A failing entry's name is preceded by `] ` (single-line message), by `] ` at
+        // the start of a continuation line (multi-line message), by the tail of a
+        // continuation line, or by one space (invariant). A `[PASS]`/`[SKIP]` line
+        // reaches none of those: the alternation admits a leading `[` only for `[FAIL`.
+        fail_pattern: r"(?m)^(?:(?:(?:\[FAIL|[^\[\n])[^\n]*?)?\] | )(\w+)\([^\n]*\) \((?:gas|runs):",
+    },
+    Harness {
+        name: "cargo",
+        // One line per test binary and per doctest run; they sum.
+        proof: r"(?m)^test result: \w+\. (\d+) passed; (\d+) failed;",
+        // `(.+)` not `(\S+)`: a doctest's name has spaces in it
+        // ("src/lib.rs - two (line 2)").
+        fail_pattern: r"(?m)^test (.+) \.\.\. FAILED$",
+    },
+];
+
+fn harness_named(name: &str) -> Option<&'static Harness> {
+    HARNESSES.iter().find(|h| h.name == name)
+}
+
+fn harness_names() -> String {
+    HARNESSES
+        .iter()
+        .map(|h| h.name)
+        .collect::<Vec<_>>()
+        .join(", ")
+}
+
+/// PURE: the proof and fail patterns a suite config resolves to.
+///
+/// An explicit pattern wins over the harness's: a repo whose suite wraps the harness
+/// (a build.sh that reformats output) must still be able to say so, and silently
+/// ignoring what the config asked for would be its own lie.
+fn resolve_patterns(cfg: &SuiteConfig) -> Result<(String, Option<String>), String> {
+    let harness = match cfg.harness.as_deref() {
+        None => None,
+        Some(name) => Some(harness_named(name).ok_or_else(|| {
+            format!(
+                "suite.harness {name:?} is not one this build ships (have: {}) — \
+                 drop it and write suite.proof yourself, or add the harness",
+                harness_names()
+            )
+        })?),
+    };
+    let proof = cfg
+        .proof
+        .clone()
+        .or_else(|| harness.map(|h| h.proof.to_string()))
+        .ok_or("suite.proof is required unless suite.harness supplies it")?;
+    let fail_pattern = cfg
+        .fail_pattern
+        .clone()
+        .or_else(|| harness.map(|h| h.fail_pattern.to_string()));
+    Ok((proof, fail_pattern))
 }
 
 #[derive(Deserialize)]
@@ -151,6 +249,27 @@ fn classify_suite(output: &str, exit_ok: bool, proof: &regex::Regex) -> SuiteOut
     }
 }
 
+/// How many killers `killedBy` carries. The matrix wants "which test caught this",
+/// not a transcript of the whole failing suite.
+const KILLED_BY_CAP: usize = 5;
+
+/// PURE: the distinct names a fail-pattern captures from suite output, first seen first.
+///
+/// DISTINCT because harnesses repeat themselves: forge prints every failing test twice,
+/// once inline and again under `Failing tests:`, so an undeduped list spends its cap on
+/// two names printed twice and drops the rest.
+fn captured_names(output: &str, fail_pattern: &regex::Regex) -> Vec<String> {
+    let mut names: Vec<String> = Vec::new();
+    for cap in fail_pattern.captures_iter(output) {
+        if let Some(m) = cap.get(1) {
+            if !names.iter().any(|n| n == m.as_str()) {
+                names.push(m.as_str().to_string());
+            }
+        }
+    }
+    names
+}
+
 /// PURE: a mutant's verdict from its suite outcome.
 ///
 /// KILLED on failed > 0 OR a non-zero exit with proof present: a harness that proves it
@@ -177,11 +296,9 @@ fn mutant_verdict(outcome: SuiteOutcome, fail_pattern: Option<&regex::Regex>) ->
             if failed > 0 || !exit_ok {
                 let killed_by = fail_pattern
                     .map(|re| {
-                        re.captures_iter(&output)
-                            .filter_map(|c| c.get(1))
-                            .map(|m| m.as_str().to_string())
-                            .take(5)
-                            .collect()
+                        let mut names = captured_names(&output, re);
+                        names.truncate(KILLED_BY_CAP);
+                        names
                     })
                     .unwrap_or_default();
                 Verdict::Killed { killed_by }
@@ -225,6 +342,34 @@ fn baseline_defect(outcome: &SuiteOutcome) -> Option<String> {
             }
         }
     }
+}
+
+/// PURE: why a fail-pattern cannot be trusted, or None if it is sound.
+///
+/// The baseline already runs, and by the time this is asked `baseline_defect` has
+/// established that ZERO tests failed there. So anything the fail-pattern captures out
+/// of the baseline's own output is the name of a PASSING test — the pattern matches
+/// result lines it must not, and every `killedBy` it goes on to produce credits tests
+/// that cannot possibly have killed anything.
+///
+/// This is not a near-miss worth a warning. `[PASS] testFoo(` and `[FAIL: …] testFoo(`
+/// differ by a few characters, and a matrix built on the wide pattern reads exactly like
+/// a correct one — a pure-constant assertion appeared as the killer of a guard mutant in
+/// the incident this check exists for. Abort, the way a red baseline aborts.
+fn fail_pattern_defect(baseline_output: &str, fail_pattern: &regex::Regex) -> Option<String> {
+    let names = captured_names(baseline_output, fail_pattern);
+    if names.is_empty() {
+        return None;
+    }
+    let shown = names.len().min(KILLED_BY_CAP);
+    Some(format!(
+        "suite.fail-pattern matches the GREEN baseline's own output: it captured {} \
+         name(s) where nothing failed, so it matches PASSING result lines and every \
+         killedBy it produced would be wrong. Captured: {}{}",
+        names.len(),
+        names[..shown].join(", "),
+        if names.len() > shown { ", ..." } else { "" }
+    ))
 }
 
 /// PURE: exit code from the pass's verdicts (baseline defects exit earlier, as 2).
@@ -411,12 +556,9 @@ MUTANTS FILE (TOML)
                                   # here (wrapper script is fine): the probe runs
                                   # exactly this per verdict, and a suite that tests
                                   # stale artifacts is the #1 way a matrix lies.
-    proof = '(\d+) passed; (\d+) failed'
-                                  # 2 capture groups: passed, failed — read from the
-                                  # suite's own tally. Multiple matches SUM (cargo
-                                  # prints one line per test binary). No match =
-                                  # the suite did not provably run.
-    fail-pattern = 'test (\S+) \.\.\. FAILED'   # optional: 1 group naming a killer
+    harness = "forge"             # prefer this to hand-written patterns: it supplies
+                                  # a known-good proof + fail-pattern for that
+                                  # harness's output format (see HARNESSES below).
     timeout-secs = 1800           # optional; the suite's process group is killed
 
     [[mutants]]
@@ -424,6 +566,31 @@ MUTANTS FILE (TOML)
     file = "src/lib.rs"           # relative to root
     target = "if !ok {"           # must occur EXACTLY once in the file
     replacement = "if ok {"
+
+HARNESSES
+    harness = "forge" | "cargo"   Supplies proof and fail-pattern. Each shipped
+                                  pattern is pinned by a test to real captured
+                                  output of that harness, green and red.
+
+    Without a harness, write the two patterns yourself:
+
+    proof = '(\d+) passed; (\d+) failed'
+                                  # 2 capture groups: passed, failed — read from the
+                                  # suite's own tally. Multiple matches SUM (cargo
+                                  # prints one line per test binary). No match =
+                                  # the suite did not provably run. REQUIRED unless
+                                  # harness supplies it.
+    fail-pattern = '(?m)^test (.+) \.\.\. FAILED$'   # optional: 1 group, the killer
+
+    Either given explicitly overrides the harness's. Both are worth avoiding: a
+    fail-pattern is easy to get wrong in two opposite directions, and neither
+    shows up as a wrong VERDICT — only as a wrong or empty killer column.
+      too wide   also matches PASSING result lines, so mutants are credited to
+                 tests that cannot kill them. The probe aborts on this: at the
+                 green baseline the pattern must capture NOTHING.
+      too narrow matches nothing (e.g. `.` does not cross the newlines in a
+                 multi-line assertion message), and says nothing. The probe
+                 prints "killer NOT NAMED" per kill instead of shipping a blank.
 
 VERDICTS
     KILLED         suite ran and failed (failing tally, or non-zero exit with proof
@@ -435,7 +602,8 @@ VERDICTS
     HARNESS-ERROR  the mutant is invalid: target not found exactly once
 
 INTEGRITY (enforced)
-    A red, silent, or zero-test baseline aborts before any probe. Writes are
+    A red, silent, or zero-test baseline aborts before any probe, and so does a
+    fail-pattern that matches that baseline's own output. Writes are
     atomic (temp + rename): no failure mode leaves a file truncated. Every
     restore is verified byte-exact, and each file is re-checked pristine before
     the next mutant. Suite output is capped per stream (oldest bytes dropped).
@@ -444,7 +612,7 @@ EXIT CODES
     0  baseline green and every probed mutant KILLED
     1  the pass ran; something SURVIVED, was NO-RUN, or was a HARNESS-ERROR
     2  the pass could not run or be trusted (config error, red baseline,
-       restore failure)
+       fail-pattern that matches the baseline, restore failure)
 "#;
 
 fn main() {
@@ -484,12 +652,13 @@ fn main() {
     // Validate regexes at load, loudly: a proof with fewer than two capture groups can
     // never prove a run, which would score every mutant NO-RUN and look like a broken
     // suite instead of a broken config.
-    let proof = regex::Regex::new(&cfg.suite.proof)
+    let (proof_src, fail_pattern_src) = resolve_patterns(&cfg.suite).unwrap_or_else(|e| fail(&e));
+    let proof = regex::Regex::new(&proof_src)
         .unwrap_or_else(|e| fail(&format!("suite.proof is not a valid regex: {e}")));
     if proof.captures_len() < 3 {
         fail("suite.proof needs two capture groups: (passed) and (failed)");
     }
-    let fail_pattern = cfg.suite.fail_pattern.as_deref().map(|p| {
+    let fail_pattern = fail_pattern_src.as_deref().map(|p| {
         let re = regex::Regex::new(p)
             .unwrap_or_else(|e| fail(&format!("suite.fail-pattern is not a valid regex: {e}")));
         if re.captures_len() < 2 {
@@ -536,10 +705,22 @@ fn main() {
     if let Some(defect) = baseline_defect(&baseline) {
         fail(&defect);
     }
-    let (base_passed, base_failed) = match &baseline {
-        SuiteOutcome::Ran { passed, failed, .. } => (*passed, *failed),
+    let (base_passed, base_failed, base_output) = match &baseline {
+        SuiteOutcome::Ran {
+            passed,
+            failed,
+            output,
+            ..
+        } => (*passed, *failed, output),
         _ => unreachable!("baseline_defect rejects non-Ran outcomes"),
     };
+    // The green baseline is also the oracle for the fail-pattern: nothing failed, so
+    // anything it matches here it would go on to misreport as a killer.
+    if let Some(re) = fail_pattern.as_ref() {
+        if let Some(defect) = fail_pattern_defect(base_output, re) {
+            fail(&defect);
+        }
+    }
     println!("baseline: green ({base_passed} passed)");
 
     let mut reports: Vec<MutantReport> = Vec::new();
@@ -594,6 +775,18 @@ fn main() {
         let line = match &verdict {
             Verdict::Killed { killed_by } if !killed_by.is_empty() => {
                 format!("{} — killed by: {}", verdict.label(), killed_by.join(", "))
+            }
+            // The verdict is sound (it comes from the tally) but the killer column is
+            // blank, which is the OTHER way a fail-pattern fails: too narrow, and
+            // silent about it. The baseline check cannot see this one — a pattern that
+            // matches nothing matches nothing at baseline too — so say it here rather
+            // than let a matrix ship with no killers in it.
+            Verdict::Killed { killed_by } if killed_by.is_empty() && fail_pattern.is_some() => {
+                format!(
+                    "{} — killer NOT NAMED: suite.fail-pattern matched nothing in this \
+                     mutant's failing output",
+                    verdict.label()
+                )
             }
             Verdict::NoRun { detail } | Verdict::HarnessError { detail } => {
                 format!("{} — {}", verdict.label(), detail)
@@ -843,5 +1036,247 @@ mod tests {
     fn tail_keeps_the_end_and_flattens_newlines() {
         assert_eq!(tail("abc\ndef", 4), " def");
         assert_eq!(tail("ab", 4), "ab");
+    }
+
+    // ------------------------------------------------- shipped harnesses ----
+    //
+    // Real captured output, verbatim, from a throwaway project holding the shapes a
+    // shipped pattern has to survive: a PASS line, a single-line [FAIL: …], a
+    // multi-line assertEq message (generated Solidity source — the shape that broke
+    // the pattern in the incident), a fuzz counterexample with `]` inside the
+    // message, a custom-error revert, a snake_case test name, an invariant failure
+    // (name on a later line after a [Sequence] block), and forge's `Failing tests:`
+    // recap, which prints every failure a second time.
+    //
+    //   forge-1.7.1-*         forge 1.7.1, `forge test --offline [--fuzz-seed 1]`
+    //   forge-1.0.0-nightly-* forge 1.0.0-nightly, same, `--color never`
+    //   cargo-1.95.0-red      cargo 1.95.0, `cargo test --no-fail-fast --color never`
+    //   cargo-1.95.0-green    the same, filtered to the passing test
+    //
+    // Two forge versions because a pattern that only reads the newest build is not a
+    // known-good pattern for the org's repos.
+    const FORGE_GREEN: &str = include_str!("../fixtures/forge-1.7.1-green.txt");
+    const FORGE_RED: &str = include_str!("../fixtures/forge-1.7.1-red.txt");
+    const FORGE_OLD_RED: &str = include_str!("../fixtures/forge-1.0.0-nightly-red.txt");
+    const CARGO_GREEN: &str = include_str!("../fixtures/cargo-1.95.0-green.txt");
+    const CARGO_RED: &str = include_str!("../fixtures/cargo-1.95.0-red.txt");
+
+    fn shipped(name: &str) -> (regex::Regex, regex::Regex) {
+        let h = harness_named(name).expect("shipped harness");
+        (
+            regex::Regex::new(h.proof).expect("proof compiles"),
+            regex::Regex::new(h.fail_pattern).expect("fail-pattern compiles"),
+        )
+    }
+
+    /// Every failure in both red forge fixtures, in the order forge first prints them.
+    const FORGE_KILLERS: &[&str] = &[
+        "testGeneratedSourceMatchesSnapshot", // multi-line assertEq message
+        "testSingleLineFailure",
+        "testCustomErrorRevertIsUncaught",
+        "testFuzz_BoundedIsAlwaysSmall", // counterexample with `]` inside the message
+        "testPlainRevert",
+        "test_snake_case_name_fails", // snake_case, not just `test\w+`
+        "invariant_NeverIncrements",  // name on its own line, after a [Sequence] block
+    ];
+
+    #[test]
+    fn shipped_forge_proof_reads_forges_own_tally() {
+        let (proof, _) = shipped("forge");
+        // "4 tests passed, 7 failed" per forge's own run summary, reached by summing
+        // the per-contract `Suite result:` lines — and NOT double-counted off that
+        // summary line, which is comma-shaped.
+        for (fixture, label) in [(FORGE_RED, "1.7.1"), (FORGE_OLD_RED, "1.0.0-nightly")] {
+            match classify_suite(fixture, false, &proof) {
+                SuiteOutcome::Ran { passed, failed, .. } => {
+                    assert_eq!((passed, failed), (4, 7), "forge {label}");
+                }
+                other => panic!("forge {label}: expected Ran, got {other:?}"),
+            }
+        }
+        match classify_suite(FORGE_GREEN, true, &proof) {
+            SuiteOutcome::Ran { passed, failed, .. } => assert_eq!((passed, failed), (2, 0)),
+            other => panic!("expected Ran, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn shipped_forge_fail_pattern_names_every_failure_and_no_passing_test() {
+        let (_, fp) = shipped("forge");
+        for (fixture, label) in [(FORGE_RED, "1.7.1"), (FORGE_OLD_RED, "1.0.0-nightly")] {
+            assert_eq!(
+                captured_names(fixture, &fp),
+                FORGE_KILLERS,
+                "forge {label}: every failing test, once each — forge prints them twice, \
+                 and the run's own summary says 7"
+            );
+        }
+        // …and the green run, which is nothing but [PASS] lines, yields none.
+        assert!(captured_names(FORGE_GREEN, &fp).is_empty());
+        assert!(fail_pattern_defect(FORGE_GREEN, &fp).is_none());
+    }
+
+    #[test]
+    fn shipped_cargo_patterns_read_real_cargo_output() {
+        let (proof, fp) = shipped("cargo");
+        match classify_suite(CARGO_RED, false, &proof) {
+            SuiteOutcome::Ran { passed, failed, .. } => {
+                // lib 1+1, integration 1+1, doctest 1+0 — the tallies sum across
+                // every target, which is why one proof works for a cargo workspace.
+                assert_eq!((passed, failed), (3, 2));
+            }
+            other => panic!("expected Ran, got {other:?}"),
+        }
+        assert_eq!(
+            captured_names(CARGO_RED, &fp),
+            vec!["tests::unit_fails_multiline", "integration_fails"]
+        );
+        match classify_suite(CARGO_GREEN, true, &proof) {
+            SuiteOutcome::Ran { passed, failed, .. } => assert_eq!((passed, failed), (1, 0)),
+            other => panic!("expected Ran, got {other:?}"),
+        }
+        assert!(fail_pattern_defect(CARGO_GREEN, &fp).is_none());
+    }
+
+    #[test]
+    fn the_incidents_wide_pattern_is_caught_by_the_green_baseline() {
+        // `'\] (test\w+)\('` — the pattern the campaign actually shipped. It matches
+        // `[PASS] testFoo(` as readily as `[FAIL: …] testFoo(`, and the green
+        // baseline is where that is provable: nothing failed, so anything captured
+        // here is a passing test.
+        let wide = regex::Regex::new(r"\] (test\w+)\(").unwrap();
+        let defect = fail_pattern_defect(FORGE_GREEN, &wide).expect("must be rejected");
+        assert!(defect.contains("testHeadGenesisIsNotZero"), "{defect}");
+        assert!(defect.contains("testAppliedIsIdempotent"), "{defect}");
+    }
+
+    #[test]
+    fn a_sound_fail_pattern_captures_nothing_at_a_green_baseline() {
+        let fp = regex::Regex::new(r"(?m)^(\S+) \.\.\. FAILED$").unwrap();
+        assert!(fail_pattern_defect("guard_test ... ok\n1 passed | 0 failed", &fp).is_none());
+    }
+
+    #[test]
+    fn the_s_flag_fixes_multiline_messages_and_then_misattributes_invariants() {
+        // Issue #13 proposed `(?s)` as the one-line fix, flagged as unverified. Both
+        // halves of that, against real forge output:
+        //
+        // It IS the reason the narrow pattern names nobody — `.` stops at the
+        // newlines inside a multi-line assertEq message, so `.*?` never reaches `]`.
+        let narrow = regex::Regex::new(r"\[FAIL.*?\] (test\w+)\(").unwrap();
+        assert!(!captured_names(FORGE_RED, &narrow)
+            .iter()
+            .any(|n| n == "testGeneratedSourceMatchesSnapshot"));
+        let dotall = regex::Regex::new(r"(?s)\[FAIL.*?\] (test\w+)\(").unwrap();
+        assert!(captured_names(FORGE_RED, &dotall)
+            .iter()
+            .any(|n| n == "testGeneratedSourceMatchesSnapshot"));
+
+        // And it trades that blank for a WRONG cell, which is the worse half. A forge
+        // invariant failure has no `] name(` of its own — the name is on a later line,
+        // after a [Sequence] block — so `(?s)` runs on past the end of that entry and
+        // stops at the next `] name(` in the output. When the next one belongs to a
+        // [PASS] line, the pattern names a test that PASSED under the mutant: defect 1
+        // again, arrived at from the opposite direction.
+        let dotall_any = regex::Regex::new(r"(?s)\[FAIL.*?\] (\w+)\(").unwrap();
+        for (fixture, label) in [(FORGE_RED, "1.7.1"), (FORGE_OLD_RED, "1.0.0-nightly")] {
+            let names = captured_names(fixture, &dotall_any);
+            assert!(
+                !names.iter().any(|n| n == "invariant_NeverIncrements"),
+                "forge {label}: (?s) drops the invariant: {names:?}"
+            );
+            assert!(
+                names.iter().any(|n| n == "testCounterStartsAtZero"),
+                "forge {label}: (?s) names a PASSING test: {names:?}"
+            );
+        }
+        // The shipped pattern is line-anchored instead: all seven failures, no passers.
+        let (_, fp) = shipped("forge");
+        assert_eq!(captured_names(FORGE_OLD_RED, &fp), FORGE_KILLERS);
+    }
+
+    #[test]
+    fn killed_by_is_distinct_and_capped() {
+        let fp = regex::Regex::new(r"(?m)^(\S+) \.\.\. FAILED$").unwrap();
+        let mut out = String::new();
+        for i in 0..8 {
+            // Each name printed twice, the way forge repeats its failures.
+            out.push_str(&format!("t{i} ... FAILED\nt{i} ... FAILED\n"));
+        }
+        out.push_str("0 passed | 8 failed");
+        let outcome = classify_suite(&out, false, &proof());
+        match mutant_verdict(outcome, Some(&fp)) {
+            Verdict::Killed { killed_by } => {
+                assert_eq!(killed_by, vec!["t0", "t1", "t2", "t3", "t4"]);
+            }
+            other => panic!("expected Killed, got {other:?}"),
+        }
+    }
+
+    fn suite_config(toml_body: &str) -> SuiteConfig {
+        let cfg: Config = toml::from_str(&format!(
+            "[suite]\nroot = \".\"\ncommand = [\"sh\"]\n{toml_body}\n"
+        ))
+        .expect("config parses");
+        cfg.suite
+    }
+
+    #[test]
+    fn a_named_harness_supplies_both_patterns() {
+        let (proof, fp) = resolve_patterns(&suite_config(r#"harness = "forge""#)).unwrap();
+        let h = harness_named("forge").unwrap();
+        assert_eq!(proof, h.proof);
+        assert_eq!(fp.as_deref(), Some(h.fail_pattern));
+    }
+
+    #[test]
+    fn explicit_patterns_override_the_harness() {
+        // A suite that wraps or reformats its harness's output must still be able to
+        // say so; silently using the harness's pattern would be its own wrong matrix.
+        let cfg = suite_config(
+            "harness = \"forge\"\nproof = '(\\d+) ok (\\d+) bad'\nfail-pattern = 'X(\\w+)'",
+        );
+        let (proof, fp) = resolve_patterns(&cfg).unwrap();
+        assert_eq!(proof, r"(\d+) ok (\d+) bad");
+        assert_eq!(fp.as_deref(), Some(r"X(\w+)"));
+    }
+
+    #[test]
+    fn an_unknown_harness_names_the_ones_that_exist() {
+        let err = resolve_patterns(&suite_config(r#"harness = "jest""#)).unwrap_err();
+        assert!(err.contains("jest"), "{err}");
+        assert!(err.contains("forge") && err.contains("cargo"), "{err}");
+    }
+
+    #[test]
+    fn without_a_harness_proof_is_still_required() {
+        let err = resolve_patterns(&suite_config("")).unwrap_err();
+        assert!(err.contains("suite.proof"), "{err}");
+        // …and a hand-written proof alone is enough, with no killer attribution.
+        let (proof, fp) = resolve_patterns(&suite_config(r"proof = '(\d+)/(\d+)'")).unwrap();
+        assert_eq!(proof, r"(\d+)/(\d+)");
+        assert_eq!(fp, None);
+    }
+
+    #[test]
+    fn every_shipped_pattern_compiles_with_the_groups_the_probe_reads() {
+        for h in HARNESSES {
+            let proof = regex::Regex::new(h.proof)
+                .unwrap_or_else(|e| panic!("{}: proof does not compile: {e}", h.name));
+            assert!(
+                proof.captures_len() >= 3,
+                "{}: proof needs (passed) and (failed)",
+                h.name
+            );
+            let fp = regex::Regex::new(h.fail_pattern)
+                .unwrap_or_else(|e| panic!("{}: fail-pattern does not compile: {e}", h.name));
+            assert_eq!(
+                fp.captures_len(),
+                2,
+                "{}: fail-pattern needs exactly one group — the probe reads group 1, so a \
+                 second group would be silently ignored",
+                h.name
+            );
+        }
     }
 }
