@@ -1,6 +1,6 @@
 ---
 name: adversarial-mutation-test
-version: 0.31.0
+version: 0.32.0
 description: Use to systematically find BUGS in and harden the test suite for a WHOLE repository (or a whole module of it). Two co-equal goals the name carries: ADVERSARIAL (treat spec/intent as the oracle and the code as suspect — derive expected behavior independently and hunt for inputs where the code is wrong) and MUTATION (prove tests cover the code). Mutation-drives a behavior-centric coverage ledger — for each behavior, break the line and check the whole suite: existing tests that kill the mutant are validated and logged (so existing coverage is audited and in scope), and only surviving mutants (real gaps) get a new discriminating test. An existing test that already kills mutants is left as-is; one meant to cover a behavior but that a mutant survives is strengthened in place (not duplicated); one broken on the unmutated baseline is fixed or its underlying code bug surfaced; a test is never edited to swallow a mutation. Designed for long campaigns that outlive the context window: progress lives in a durable gitignored scratch file so it survives compaction. A single change/PR/function is just a narrowed scope. Triggers on "test the whole repo", "harden the test suite", "mutation test the codebase", "audit the tests", "adversarial tests", "prove these tests cover the code", "exhaust the eventualities".
 ---
 
@@ -71,8 +71,8 @@ adversarial pass judges covered behaviors too.
 
    `mutation-probe --help` is the manual (file format, verdicts, exit codes).
    The bin enforces probe integrity — green non-empty baseline, proof the suite
-   actually ran, exactly-once targets, byte-exact restore — so a crashed suite
-   or a no-op mutant can never fake a result. Yours to uphold: **commit before
+   actually ran, exactly-once targets, byte-exact restore, one live probe per
+   tree — so a crashed suite or a no-op mutant can never fake a result. Yours to uphold: **commit before
    the first probe** (the auditable recovery point), and **keep targets out of
    test code** — a target in the oracle co-mutates the expectation and voids the
    probe.
@@ -152,6 +152,12 @@ One mutation, one behavior — the failing-test set stays diagnostic.
   matrix silently lies), and a worktree's shared `.git` contends on every
   commit/restore. A clone isolates both; each worker provisions, probes,
   commits, pushes, and opens its own PR.
+- **A probe outlives the agent that launched it.** A clone isolates workers from
+  each other, never a worker from its own orphans: an agent that dies mid-pass
+  leaves `mutation-probe` running until its mutants are done, and a missing
+  report reads exactly like a pass that never started. Before re-running a pass
+  or reusing a clone, read `<root>/.mutation-test/probe.lock` — the probe refuses
+  a tree a live probe already owns, and names the mutant a dead one left applied.
 - **Orchestrator slices; agents never self-select.** Survey returns a
   schema-validated list; partition it into explicit disjoint batches in
   orchestrator code; converge loop-until-dry against a seen-set. Agents editing

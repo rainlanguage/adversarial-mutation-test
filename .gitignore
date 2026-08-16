@@ -1,2 +1,4 @@
 target/
 /result
+# mutation-probe's own lock lands here when this repo is the tree being probed.
+.mutation-test/

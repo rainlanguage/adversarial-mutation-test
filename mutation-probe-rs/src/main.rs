@@ -19,12 +19,15 @@
 //
 // Exit codes: 0 = baseline green and every probed mutant KILLED; 1 = the pass ran and
 // something was not killed (survivor / no-run / harness-error); 2 = the pass could not
-// run or could not be trusted (config unreadable, baseline not green, restore failed).
+// run or could not be trusted (config unreadable, baseline not green, restore failed,
+// another probe owns the tree).
 
 use std::collections::BTreeMap;
 use std::io::Read;
+use std::path::{Path, PathBuf};
 use std::process::Stdio;
-use std::time::{Duration, Instant};
+use std::sync::OnceLock;
+use std::time::{Duration, Instant, SystemTime, UNIX_EPOCH};
 
 use serde::{Deserialize, Serialize};
 
@@ -354,6 +357,273 @@ fn run_suite(
     Ok(classify_suite(&combined, status.success(), proof))
 }
 
+// ------------------------------------------------------------------- lock ----
+
+// A probe outlives the agent that launched it. An agent that dies mid-pass (token
+// guard, compaction, kill) leaves mutation-probe running until its remaining mutants
+// are done: in one campaign two such orphans mutated and restored one file for two
+// hours inside clones nobody owned, and a successor — told the reports "do not exist",
+// which is also what an unfinished pass looks like — was dispatched to re-run them
+// against those same clones. Two probes on one tree interleave: one's restore lands as
+// the other's mutant, and every verdict after that attaches to the wrong code. That is
+// the failure a per-worker clone exists to prevent, and a clone cannot prevent it — a
+// clone isolates workers from each other, never a worker from its own orphans.
+//
+// So the tree carries the claim: `<root>/.mutation-test/probe.lock`, created
+// exclusively before the baseline, rewritten with the mutant currently on disk, and
+// removed on every exit this process controls. Keyed by root because the contended
+// resource is the tree, not the config or the report: two passes with different
+// mutants files still mutate one working copy. Derived from root, so a successor
+// holding nothing but the clone path can read who owns it, how far it got, and whether
+// it died with a mutant applied — instead of inferring liveness from an absent report.
+
+const LOCK_DIR: &str = ".mutation-test";
+const LOCK_FILE: &str = "probe.lock";
+
+fn lock_path(root: &Path) -> PathBuf {
+    root.join(LOCK_DIR).join(LOCK_FILE)
+}
+
+/// The owning run, as the next reader of the tree needs it.
+#[derive(Debug, Serialize, Deserialize, PartialEq, Eq)]
+#[serde(deny_unknown_fields)]
+struct LockRecord {
+    pid: u32,
+    /// Liveness of a pid is only checkable on the machine that recorded it.
+    host: String,
+    #[serde(rename = "started-unix")]
+    started_unix: u64,
+    root: String,
+    config: String,
+    command: Vec<String>,
+    mutants: usize,
+    /// Serialized as a table, so it stays last.
+    phase: Phase,
+}
+
+/// Where the run is, and — the part a successor cannot get anywhere else — whether a
+/// mutant is currently written to the tree.
+#[derive(Debug, Serialize, Deserialize, PartialEq, Eq)]
+#[serde(tag = "kind", rename_all = "kebab-case")]
+enum Phase {
+    /// No mutant has been applied yet: the tree is as the run found it.
+    Baseline,
+    /// This mutant is on disk. A run killed here leaves the tree mutated; the field
+    /// is NOT cleared after the restore, so it reads as "the last mutant this run
+    /// wrote", and a dead run always costs the successor one tree check. Over-
+    /// reporting dirt is recoverable; under-reporting it is the incident.
+    Probing {
+        mutant: String,
+        file: String,
+        index: usize,
+    },
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum Liveness {
+    Alive,
+    Dead,
+    /// Not checkable from here (another host, an implausible pid, an unknown errno).
+    Unknown,
+}
+
+#[derive(Debug, PartialEq, Eq)]
+enum LockDecision {
+    Abort(String),
+    Reclaim(String),
+}
+
+fn now_unix() -> u64 {
+    SystemTime::now()
+        .duration_since(UNIX_EPOCH)
+        .unwrap_or_default()
+        .as_secs()
+}
+
+#[cfg(unix)]
+fn hostname() -> String {
+    let mut buf = vec![0u8; 256];
+    // SAFETY: gethostname writes at most buf.len() bytes into a buffer we own.
+    let rc = unsafe { libc::gethostname(buf.as_mut_ptr() as *mut libc::c_char, buf.len()) };
+    if rc != 0 {
+        return "unknown-host".to_string();
+    }
+    let end = buf.iter().position(|&b| b == 0).unwrap_or(buf.len());
+    String::from_utf8_lossy(&buf[..end]).into_owned()
+}
+
+#[cfg(not(unix))]
+fn hostname() -> String {
+    "unknown-host".to_string()
+}
+
+/// Is the recorded owner still running?
+///
+/// A pid only means anything on the host that issued it, so a foreign host is Unknown
+/// rather than assumed dead — and Unknown aborts. Pid reuse can report a stranger as
+/// the owner; that direction costs one manual `rm`, while the other direction is two
+/// probes on one tree.
+#[cfg(unix)]
+fn process_liveness(record_host: &str, our_host: &str, pid: u32) -> Liveness {
+    if record_host != our_host {
+        return Liveness::Unknown;
+    }
+    if pid == 0 || pid > i32::MAX as u32 {
+        return Liveness::Unknown;
+    }
+    // SAFETY: signal 0 delivers nothing; it only asks whether the pid exists.
+    if unsafe { libc::kill(pid as libc::pid_t, 0) } == 0 {
+        return Liveness::Alive;
+    }
+    match std::io::Error::last_os_error().raw_os_error() {
+        // Running, owned by another user.
+        Some(libc::EPERM) => Liveness::Alive,
+        Some(libc::ESRCH) => Liveness::Dead,
+        _ => Liveness::Unknown,
+    }
+}
+
+#[cfg(not(unix))]
+fn process_liveness(_record_host: &str, _our_host: &str, _pid: u32) -> Liveness {
+    Liveness::Unknown
+}
+
+/// PURE: what a probe does about a lock it found.
+///
+/// Only one case reclaims: an owner this host can prove is gone, which never applied a
+/// mutant, so the tree it leaves behind is the tree it was given. Everything else is a
+/// question about code state that a probe must not answer by overwriting the evidence.
+fn lock_decision(found: &LockRecord, liveness: Liveness, now: u64) -> LockDecision {
+    let age = now.saturating_sub(found.started_unix);
+    let who = format!("pid {} on {} (started {age}s ago)", found.pid, found.host);
+    match (liveness, &found.phase) {
+        (Liveness::Alive, phase) => LockDecision::Abort(format!(
+            "another mutation-probe owns this tree: {who}, {}. Two probes on one tree \
+             interleave mutant and restore, so every verdict lands on the wrong code — \
+             wait for it, or give this pass its own clone.",
+            describe_phase(phase)
+        )),
+        (Liveness::Unknown, phase) => LockDecision::Abort(format!(
+            "a mutation-probe lock is held by {who}, {} — this host cannot check whether \
+             that process is still running. Confirm it is gone, verify the tree, then \
+             delete the lock.",
+            describe_phase(phase)
+        )),
+        (
+            Liveness::Dead,
+            Phase::Probing {
+                mutant,
+                file,
+                index,
+            },
+        ) => LockDecision::Abort(format!(
+            "a mutation-probe ({who}) died at mutant {index} with {mutant:?} written to \
+             {file}. The tree may still hold that mutant, and probing mutated source \
+             scores every verdict against code nobody wrote. Verify and restore the tree \
+             (`git status --porcelain`, `git checkout -- {file}`), then delete the lock."
+        )),
+        (Liveness::Dead, Phase::Baseline) => LockDecision::Reclaim(format!(
+            "reclaiming a stale lock: {who} died before applying any mutant, so the tree \
+             it held is unmutated"
+        )),
+    }
+}
+
+fn describe_phase(phase: &Phase) -> String {
+    match phase {
+        Phase::Baseline => "running the baseline".to_string(),
+        Phase::Probing {
+            mutant,
+            file,
+            index,
+        } => format!("at mutant {index}, {mutant:?} applied to {file}"),
+    }
+}
+
+/// Set ONLY by an acquire that won the race, so an abort onto someone else's lock can
+/// never delete it on the way out.
+static HELD_LOCK: OnceLock<PathBuf> = OnceLock::new();
+
+fn serialize_lock(record: &LockRecord) -> String {
+    toml::to_string(record).expect("the lock record serializes")
+}
+
+/// Take the tree, or say who has it. The link below is the exclusion itself — the
+/// check and the claim are one syscall, so two probes starting together cannot both
+/// win, and the loser reads a record that is already complete.
+fn acquire_lock(path: &Path, record: &LockRecord) -> Result<(), String> {
+    if let Some(dir) = path.parent() {
+        std::fs::create_dir_all(dir)
+            .map_err(|e| format!("cannot create lock directory {}: {e}", dir.display()))?;
+    }
+    if let Err(e) = create_lock_exclusively(path, record) {
+        if e.kind() != std::io::ErrorKind::AlreadyExists {
+            return Err(format!("cannot write lock {}: {e}", path.display()));
+        }
+        let raw = std::fs::read_to_string(path)
+            .map_err(|e| format!("cannot read existing lock {}: {e}", path.display()))?;
+        let found: LockRecord = toml::from_str(&raw).map_err(|e| {
+            format!(
+                "lock {} exists but does not parse ({e}) — a probe wrote it and something \
+                 truncated it. Verify the tree, then delete the lock.",
+                path.display()
+            )
+        })?;
+        let liveness = process_liveness(&found.host, &record.host, found.pid);
+        match lock_decision(&found, liveness, now_unix()) {
+            LockDecision::Abort(reason) => {
+                return Err(format!("{reason}\nlock: {}", path.display()));
+            }
+            LockDecision::Reclaim(note) => {
+                eprintln!("warning: {note}");
+                std::fs::remove_file(path)
+                    .map_err(|e| format!("cannot remove stale lock {}: {e}", path.display()))?;
+                // A second probe can have reclaimed the same stale lock in that gap;
+                // it now owns the tree and this pass does not.
+                create_lock_exclusively(path, record).map_err(|e| {
+                    format!(
+                        "another probe claimed {} while this one was reclaiming a stale \
+                         lock: {e}",
+                        path.display()
+                    )
+                })?;
+            }
+        }
+    }
+    let _ = HELD_LOCK.set(path.to_path_buf());
+    Ok(())
+}
+
+/// Publish the record, then claim the path by linking to it: `link` fails with
+/// AlreadyExists if the lock is taken, and the lock only ever appears with its full
+/// contents. Creating it empty and filling it afterwards would let a losing probe read
+/// a half-written record and report a corrupt lock over a tree that is merely busy.
+fn create_lock_exclusively(path: &Path, record: &LockRecord) -> std::io::Result<()> {
+    let staged = path.with_extension(format!("staged-{}", std::process::id()));
+    std::fs::write(&staged, serialize_lock(record))?;
+    let claimed = std::fs::hard_link(&staged, path);
+    let _ = std::fs::remove_file(&staged);
+    claimed
+}
+
+/// Republish the record mid-pass. Called BEFORE the mutant reaches the tree, so the
+/// lock never lags the disk.
+fn update_lock(record: &LockRecord) -> Result<(), String> {
+    let Some(path) = HELD_LOCK.get() else {
+        return Ok(());
+    };
+    write_atomic(path, &serialize_lock(record))
+}
+
+/// Drop the claim. A lock is removed at exit rather than left as a completion record:
+/// presence has to mean "a run owns this tree", or every later probe pays to decide
+/// whether it does.
+fn release_lock() {
+    if let Some(path) = HELD_LOCK.get() {
+        let _ = std::fs::remove_file(path);
+    }
+}
+
 // ----------------------------------------------------------------- report ----
 
 #[derive(Serialize)]
@@ -387,7 +657,11 @@ struct Summary {
 
 // ------------------------------------------------------------------- main ----
 
+/// Every abort funnels here, so this is also where the tree's lock is given back —
+/// `std::process::exit` runs no destructor, and a lock outliving its aborted run makes
+/// the next probe pay for a run that is not there.
 fn fail(msg: &str) -> ! {
+    release_lock();
     eprintln!("error: {msg}");
     std::process::exit(2);
 }
@@ -439,12 +713,31 @@ INTEGRITY (enforced)
     atomic (temp + rename): no failure mode leaves a file truncated. Every
     restore is verified byte-exact, and each file is re-checked pristine before
     the next mutant. Suite output is capped per stream (oldest bytes dropped).
+    One probe per tree, enforced by the lock below.
+
+THE LOCK (<root>/.mutation-test/probe.lock)
+    Created before the baseline, removed on exit. It records the owning pid and
+    host, the start time, the root, the config, the suite command, the mutant
+    count, and the mutant currently written to the tree — so a probe that
+    outlives the agent that launched it is readable from the clone alone, and an
+    unfinished pass is no longer indistinguishable from one that never started.
+
+    Starting a probe against a locked tree:
+      owner alive         abort, naming the owning pid and its current mutant
+      owner dead, at the  reclaimed automatically: nothing was ever mutated
+        baseline
+      owner dead, past    abort — the tree may still hold that mutant. Verify
+        the baseline      and restore it, then delete the lock and re-run
+      other host          abort: this host cannot check that pid
+
+    Deleting the lock is the override, and it is deliberately manual: the thing
+    it is protecting is whether the source on disk is the source you think.
 
 EXIT CODES
     0  baseline green and every probed mutant KILLED
     1  the pass ran; something SURVIVED, was NO-RUN, or was a HARNESS-ERROR
     2  the pass could not run or be trusted (config error, red baseline,
-       restore failure)
+       restore failure, another probe owns the tree)
 "#;
 
 fn main() {
@@ -519,6 +812,28 @@ fn main() {
         });
     }
 
+    // Claim the tree before reading a single byte of it: everything below assumes the
+    // only writer is this process.
+    let lock = lock_path(&root);
+    let mut record = LockRecord {
+        pid: std::process::id(),
+        host: hostname(),
+        started_unix: now_unix(),
+        root: std::fs::canonicalize(&root)
+            .unwrap_or_else(|_| root.clone())
+            .display()
+            .to_string(),
+        config: std::fs::canonicalize(&config_path)
+            .unwrap_or_else(|_| std::path::PathBuf::from(&config_path))
+            .display()
+            .to_string(),
+        command: cfg.suite.command.clone(),
+        mutants: selected.len(),
+        phase: Phase::Baseline,
+    };
+    acquire_lock(&lock, &record).unwrap_or_else(|e| fail(&e));
+    println!("lock: {} (pid {})", lock.display(), record.pid);
+
     // Original bytes of every file the pass touches, read once up front. Also the
     // restore oracle: after every probe the file must byte-match this.
     let mut originals: BTreeMap<&str, String> = BTreeMap::new();
@@ -543,7 +858,7 @@ fn main() {
     println!("baseline: green ({base_passed} passed)");
 
     let mut reports: Vec<MutantReport> = Vec::new();
-    for m in &selected {
+    for (i, m) in selected.iter().enumerate() {
         let original = &originals[m.file.as_str()];
         let path = root.join(&m.file);
         let verdict = 'v: {
@@ -566,6 +881,15 @@ fn main() {
                 };
             }
             let mutated = original.replacen(m.target.as_str(), &m.replacement, 1);
+            // Publish the mutant to the lock BEFORE it reaches the tree. A run killed
+            // between these two writes is the case the successor must not misread, and
+            // the only safe direction is for the lock to be early rather than late.
+            record.phase = Phase::Probing {
+                mutant: m.name.clone(),
+                file: m.file.clone(),
+                index: i + 1,
+            };
+            update_lock(&record).unwrap_or_else(|e| fail(&format!("cannot update lock: {e}")));
             // Atomic (temp + rename) in both directions: a plain fs::write truncates
             // first, so a failure mid-write (ENOSPC, EIO) would leave the file
             // truncated with nothing to restore from on disk.
@@ -639,6 +963,7 @@ fn main() {
         let json = serde_json::to_string_pretty(&report).expect("report serializes");
         std::fs::write(&p, json).unwrap_or_else(|e| fail(&format!("cannot write {p}: {e}")));
     }
+    release_lock();
     std::process::exit(exit_code(&verdicts));
 }
 
@@ -837,6 +1162,143 @@ mod tests {
             "the temp file is consumed by the rename"
         );
         let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    fn lock_record(phase: Phase) -> LockRecord {
+        LockRecord {
+            pid: 4242,
+            host: "box".to_string(),
+            started_unix: 1_000,
+            root: "/clones/repo".to_string(),
+            config: "/clones/repo/mutants.toml".to_string(),
+            command: vec!["cargo".to_string(), "test".to_string()],
+            mutants: 95,
+            phase,
+        }
+    }
+
+    fn probing() -> Phase {
+        Phase::Probing {
+            mutant: "M26 guard inverted".to_string(),
+            file: "src/lib/LibCodeGen.sol".to_string(),
+            index: 26,
+        }
+    }
+
+    #[test]
+    fn a_live_owner_is_never_reclaimed() {
+        // The incident: an orphan probe still mutating a clone while a successor was
+        // dispatched to re-run the same pass against it.
+        for phase in [Phase::Baseline, probing()] {
+            let found = lock_record(phase);
+            match lock_decision(&found, Liveness::Alive, 8_200) {
+                LockDecision::Abort(reason) => {
+                    assert!(reason.contains("4242"), "names the owning pid: {reason}");
+                    assert!(reason.contains("7200s ago"), "names its age: {reason}");
+                }
+                other => panic!("a live owner must abort, got {other:?}"),
+            }
+        }
+    }
+
+    #[test]
+    fn a_dead_owner_that_had_a_mutant_applied_is_never_reclaimed() {
+        // The tree may still hold that mutant; probing it scores every verdict against
+        // source nobody wrote.
+        match lock_decision(&lock_record(probing()), Liveness::Dead, 1_100) {
+            LockDecision::Abort(reason) => {
+                assert!(
+                    reason.contains("M26 guard inverted") && reason.contains("LibCodeGen.sol"),
+                    "names the mutant still on disk and its file: {reason}"
+                );
+            }
+            other => panic!("a dead owner mid-mutation must abort, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn a_dead_owner_still_at_the_baseline_is_reclaimed() {
+        // Nothing was ever applied, so the tree is the tree this pass was given —
+        // the one case where overwriting the lock destroys no evidence.
+        match lock_decision(&lock_record(Phase::Baseline), Liveness::Dead, 1_100) {
+            LockDecision::Reclaim(note) => assert!(note.contains("4242"), "{note}"),
+            other => panic!("a stale baseline lock must be reclaimed, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn an_owner_this_host_cannot_check_is_never_reclaimed() {
+        match lock_decision(&lock_record(Phase::Baseline), Liveness::Unknown, 1_100) {
+            LockDecision::Abort(reason) => assert!(reason.contains("cannot check"), "{reason}"),
+            other => panic!("an uncheckable owner must abort, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn liveness_is_only_readable_on_the_recording_host() {
+        let here = hostname();
+        assert_eq!(
+            process_liveness(&here, &here, std::process::id()),
+            Liveness::Alive,
+            "this process is running"
+        );
+        assert_eq!(
+            process_liveness("some-other-box", &here, std::process::id()),
+            Liveness::Unknown,
+            "a pid from another host says nothing here, even when it exists locally"
+        );
+        assert_eq!(
+            process_liveness(&here, &here, 2_000_000_000),
+            Liveness::Dead,
+            "a pid past any allocator's range is gone"
+        );
+        assert_eq!(
+            process_liveness(&here, &here, 0),
+            Liveness::Unknown,
+            "pid 0 is not a process this can check"
+        );
+    }
+
+    #[test]
+    fn a_lock_cannot_be_claimed_twice() {
+        let dir = std::env::temp_dir().join(format!("mp-lock-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&dir);
+        std::fs::create_dir_all(&dir).unwrap();
+        let path = dir.join(LOCK_FILE);
+        let owner = lock_record(Phase::Baseline);
+
+        create_lock_exclusively(&path, &owner).expect("the first claim wins");
+        let second = create_lock_exclusively(&path, &lock_record(probing()))
+            .expect_err("the second claim must not win");
+        assert_eq!(second.kind(), std::io::ErrorKind::AlreadyExists);
+        assert_eq!(
+            std::fs::read_to_string(&path).unwrap(),
+            serialize_lock(&owner),
+            "and must not overwrite the owner's record"
+        );
+        assert_eq!(
+            std::fs::read_dir(&dir).unwrap().count(),
+            1,
+            "neither claim leaves a staged file behind"
+        );
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn the_lock_round_trips_through_toml() {
+        // A successor reads this file with nothing but the clone path, so the write
+        // and the read have to agree without it.
+        for phase in [Phase::Baseline, probing()] {
+            let record = lock_record(phase);
+            let text = serialize_lock(&record);
+            let parsed: LockRecord = toml::from_str(&text)
+                .unwrap_or_else(|e| panic!("the lock must parse: {e}\n{text}"));
+            assert_eq!(parsed, record);
+        }
+        assert!(
+            serialize_lock(&lock_record(probing())).contains("LibCodeGen.sol"),
+            "the applied mutant's file is readable in the file itself"
+        );
     }
 
     #[test]

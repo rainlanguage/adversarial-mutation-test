@@ -4,7 +4,8 @@
 // is plain `sh`, so the whole matrix runs hermetically inside `cargo test`.
 
 use std::path::{Path, PathBuf};
-use std::process::Command;
+use std::process::{Child, Command, Stdio};
+use std::time::{Duration, Instant};
 
 /// The suite: crashes pre-summary on BOOM, checks GUARD, never checks CAP.
 const CHECK_SH: &str = r#"
@@ -65,6 +66,56 @@ fn run(config: &Path, extra: &[&str]) -> (i32, String, serde_json::Value) {
         ),
         report,
     )
+}
+
+/// Prefix that makes the suite hang while `SLOW` is in the code — used to hold a probe
+/// at a chosen phase long enough to kill it there, the way an agent's death leaves one.
+const SLOW_PREFIX: &str = "if grep -q SLOW code.txt; then sleep 300; fi\n";
+
+fn toy_hangs_on_slow(dir: &Path, code: &str) {
+    std::fs::create_dir_all(dir).unwrap();
+    std::fs::write(dir.join("code.txt"), code).unwrap();
+    std::fs::write(dir.join("check.sh"), format!("{SLOW_PREFIX}{CHECK_SH}")).unwrap();
+}
+
+fn lock_file(dir: &Path) -> PathBuf {
+    dir.join(".mutation-test").join("probe.lock")
+}
+
+fn spawn_probe(config: &Path, extra: &[&str]) -> Child {
+    Command::new(env!("CARGO_BIN_EXE_mutation-probe"))
+        .arg(config)
+        .args(extra)
+        .stdout(Stdio::null())
+        .stderr(Stdio::null())
+        .spawn()
+        .unwrap()
+}
+
+/// The lock is rewritten by rename, so a read is never torn.
+fn wait_for_lock(dir: &Path, needle: &str) -> String {
+    let path = lock_file(dir);
+    let deadline = Instant::now() + Duration::from_secs(60);
+    loop {
+        if let Ok(text) = std::fs::read_to_string(&path) {
+            if text.contains(needle) {
+                return text;
+            }
+        }
+        assert!(
+            Instant::now() < deadline,
+            "no lock containing {needle:?} at {}",
+            path.display()
+        );
+        std::thread::sleep(Duration::from_millis(50));
+    }
+}
+
+/// Reaping matters: an unreaped child is a zombie, and a zombie's pid still answers
+/// `kill(pid, 0)` — the lock would read as live-owned.
+fn kill_and_reap(mut probe: Child) {
+    probe.kill().unwrap();
+    probe.wait().unwrap();
 }
 
 const ALL_FOUR: &str = r#"
@@ -129,6 +180,10 @@ fn weak_suite_scores_all_four_verdicts_and_restores() {
         code,
         "the tree must be restored byte-exact after the pass"
     );
+    assert!(
+        !lock_file(&dir).exists(),
+        "a finished pass hands the tree back"
+    );
     let _ = std::fs::remove_dir_all(&dir);
 }
 
@@ -167,6 +222,11 @@ fn red_baseline_aborts_without_probing() {
         report,
         serde_json::Value::Null,
         "no report on an aborted pass"
+    );
+    assert!(
+        !lock_file(&dir).exists(),
+        "an aborted pass hands the tree back too — a lock left behind by a run that is \
+         not there costs the next probe a manual check"
     );
     let _ = std::fs::remove_dir_all(&dir);
 }
@@ -265,6 +325,143 @@ replacement = "GUARD off"
     let (exit, out, report) = run(&config, &[]);
     assert_eq!(exit, 0, "killed via the tally alone; output:\n{out}");
     assert_eq!(report["mutants"][0]["verdict"].as_str(), Some("KILLED"));
+    let _ = std::fs::remove_dir_all(&dir);
+}
+
+const KILL_ONLY: &str = r#"
+[[mutants]]
+name = "M-kill guard off"
+file = "code.txt"
+target = "GUARD on"
+replacement = "GUARD off"
+"#;
+
+const KILL_AND_HANG: &str = r#"
+[[mutants]]
+name = "M-kill guard off"
+file = "code.txt"
+target = "GUARD on"
+replacement = "GUARD off"
+
+[[mutants]]
+name = "M-hang the suite sleeps forever"
+file = "code.txt"
+target = "MODE strict"
+replacement = "SLOW"
+"#;
+
+#[test]
+fn a_live_probe_owns_the_tree_and_a_second_one_refuses_to_race_it() {
+    // The incident this exists for: a probe outliving the agent that launched it while
+    // a successor is dispatched to re-run the same pass against the same clone.
+    let dir = unique_dir("live-lock");
+    toy_hangs_on_slow(&dir, "SLOW\nGUARD on\nCAP 10\nMODE strict\n");
+    let config = write_config(&dir, ALL_FOUR);
+
+    let owner = spawn_probe(&config, &[]);
+    let held = wait_for_lock(&dir, "baseline");
+    assert!(
+        held.contains(&format!("pid = {}", owner.id())),
+        "the lock names its owner:\n{held}"
+    );
+
+    let (exit, out, report) = run(&config, &[]);
+    assert_eq!(
+        exit, 2,
+        "a second probe on a live tree cannot be trusted to run; output:\n{out}"
+    );
+    assert!(
+        out.contains("owns this tree") && out.contains(&owner.id().to_string()),
+        "the abort names the owning pid:\n{out}"
+    );
+    assert!(
+        !out.contains("baseline: running suite"),
+        "and aborts before touching the tree:\n{out}"
+    );
+    assert_eq!(report, serde_json::Value::Null);
+    assert_eq!(
+        std::fs::read_to_string(lock_file(&dir)).unwrap(),
+        held,
+        "the blocked probe leaves the owner's lock exactly as it found it"
+    );
+
+    kill_and_reap(owner);
+    let _ = std::fs::remove_dir_all(&dir);
+}
+
+#[test]
+fn a_stale_lock_from_a_probe_that_died_at_the_baseline_is_reclaimed() {
+    // Nothing was applied before it died, so the tree is untouched and the successor
+    // proceeds on its own — a crash must not need a human for the harmless case.
+    let dir = unique_dir("stale-baseline");
+    let pristine = "GUARD on\nCAP 10\nMODE strict\n";
+    toy_hangs_on_slow(&dir, &format!("SLOW\n{pristine}"));
+    let config = write_config(&dir, KILL_ONLY);
+
+    let dead = spawn_probe(&config, &[]);
+    wait_for_lock(&dir, "baseline");
+    kill_and_reap(dead);
+    std::fs::write(dir.join("code.txt"), pristine).unwrap();
+
+    let (exit, out, report) = run(&config, &[]);
+    assert_eq!(exit, 0, "the successor runs; output:\n{out}");
+    assert!(
+        out.contains("reclaiming a stale lock"),
+        "and says so rather than silently overwriting evidence:\n{out}"
+    );
+    assert_eq!(report["summary"]["killed"].as_u64(), Some(1));
+    assert!(!lock_file(&dir).exists());
+    let _ = std::fs::remove_dir_all(&dir);
+}
+
+#[test]
+fn a_probe_that_died_mid_mutant_blocks_the_successor_until_the_tree_is_checked() {
+    let dir = unique_dir("stale-mutant");
+    let pristine = "GUARD on\nCAP 10\nMODE strict\n";
+    toy_hangs_on_slow(&dir, pristine);
+    let config = write_config(&dir, KILL_AND_HANG);
+
+    let dead = spawn_probe(&config, &["--only", "M-hang"]);
+    let held = wait_for_lock(&dir, "probing");
+    assert!(
+        held.contains("M-hang"),
+        "the lock names the live mutant:\n{held}"
+    );
+    kill_and_reap(dead);
+    assert!(
+        std::fs::read_to_string(dir.join("code.txt"))
+            .unwrap()
+            .contains("SLOW"),
+        "a killed probe leaves its mutant on disk — nothing restores for it"
+    );
+
+    let (exit, out, _) = run(&config, &["--only", "M-kill"]);
+    assert_eq!(
+        exit, 2,
+        "probing a possibly-mutated tree scores verdicts against source nobody wrote; \
+         output:\n{out}"
+    );
+    assert!(
+        out.contains("M-hang") && out.contains("code.txt"),
+        "the abort names the mutant left behind and its file:\n{out}"
+    );
+    assert!(
+        std::fs::read_to_string(dir.join("code.txt"))
+            .unwrap()
+            .contains("SLOW"),
+        "and repairs nothing itself"
+    );
+    assert!(
+        lock_file(&dir).exists(),
+        "the evidence outlives the blocked run"
+    );
+
+    // The recovery the abort prescribes: restore the tree, then delete the lock.
+    std::fs::write(dir.join("code.txt"), pristine).unwrap();
+    std::fs::remove_file(lock_file(&dir)).unwrap();
+    let (exit, out, report) = run(&config, &["--only", "M-kill"]);
+    assert_eq!(exit, 0, "the tree is usable again; output:\n{out}");
+    assert_eq!(report["summary"]["killed"].as_u64(), Some(1));
     let _ = std::fs::remove_dir_all(&dir);
 }
 
