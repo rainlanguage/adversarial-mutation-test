@@ -1,10 +1,8 @@
 name: version hygiene
 on:
   pull_request:
-
 permissions:
   contents: read
-
 jobs:
   version-hygiene:
     runs-on: ubuntu-latest
@@ -13,7 +11,6 @@ jobs:
         with:
           # Full history so the PR base is available to diff and read against.
           fetch-depth: 0
-
       # The marketplace listing is the only published version pointer (this repo
       # tags no releases), so it must name the same version as the plugin it
       # serves. Skew here silently publishes the wrong version to installers —
@@ -28,7 +25,6 @@ jobs:
             exit 1
           fi
           echo "versions agree: $plugin"
-
       # A skill's content IS its release. Editing skills/ without bumping the
       # version is invisible to version-based update detection ('/plugin' compares
       # version strings), so every install silently keeps running the stale

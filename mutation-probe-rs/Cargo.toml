@@ -1,0 +1,23 @@
+[package]
+name = "mutation-probe"
+version = "0.1.0"
+edition = "2021"
+rust-version = "1.82"
+license-file = "../LICENSE"
+description = "The skill's probe harness as a tested tool: applies exact-string mutants, proves the suite ran, and scores KILLED/SURVIVED/NO-RUN/HARNESS-ERROR."
+
+[[bin]]
+name = "mutation-probe"
+path = "src/main.rs"
+
+[dependencies]
+regex = "1"
+serde = { version = "1", features = ["derive"] }
+serde_json = "1"
+toml = "0.8"
+
+# Timeout enforcement must kill the suite's whole PROCESS GROUP: killing only the
+# direct child (sh) leaves descendants holding the output pipes, and the reader
+# joins would block forever.
+[target.'cfg(unix)'.dependencies]
+libc = "0.2"
