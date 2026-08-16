@@ -476,21 +476,18 @@ fn a_source_with_no_mirrored_test_falls_back_to_the_whole_suite() {
 }
 
 #[test]
-fn a_selection_that_runs_no_tests_is_refused_instead_of_scoring_a_false_gap() {
+fn a_selection_that_runs_no_tests_is_refused_at_its_own_baseline() {
     // test/flag.t.sh EXISTS, so the path check passes, but selecting it runs nothing.
-    // Probing against it would report 0 passed | 0 failed — SURVIVED — for a behavior
-    // the whole suite covers. The selection's own baseline is what catches that.
+    // Such a selection can kill nothing: every mutant would clear the narrow phase and
+    // escalate anyway, so probing against it is pure overhead and the report would name
+    // a selection that proved nothing. The selection's own baseline catches it first.
     let dir = unique_dir("narrow-empty");
     let config = narrow_toy(&dir);
     let (exit, out, report) = run(&config, &["--only", "M-emptysel"]);
     assert_eq!(exit, 0, "the whole suite kills it; output:\n{out}");
 
     let m = &report["mutants"][0];
-    assert_eq!(
-        m["verdict"].as_str(),
-        Some("KILLED"),
-        "silently narrowing to nothing would have scored this SURVIVED"
-    );
+    assert_eq!(m["verdict"].as_str(), Some("KILLED"));
     assert_eq!(m["phase"].as_str(), Some("full"));
     assert!(m["selection"].is_null());
     assert!(

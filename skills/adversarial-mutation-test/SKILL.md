@@ -89,8 +89,8 @@ adversarial pass judges covered behaviors too.
    probe an order of magnitude dearer than its first. The selection is DERIVED
    from the path, never hand-listed; where the tests do not mirror the sources,
    or the selection runs no tests, the probe falls back to the whole suite and
-   says so, because silently narrowing to nothing would score every mutant
-   SURVIVED.
+   says so — a selection that runs nothing can kill nothing, and guessing one
+   would leave the narrow phase settling nothing while still costing a run.
 4. **Act on verdicts.** KILLED = covered: credit the killing test in the ledger.
    SURVIVED = a real gap: if an existing test purports to cover the behavior,
    strengthen it in place until it kills the mutant; otherwise add a new test.

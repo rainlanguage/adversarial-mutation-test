@@ -138,10 +138,13 @@ so the report states which runs were skipped instead of implying it.
 The selection is **derived, never hand-listed**. Where a repo's tests do not
 mirror its sources the derivation fails and that mutant falls back to the whole
 suite, out loud — `from` not matching, the derived path not existing, or the
-selection not being green-and-non-empty at its own baseline. Silently narrowing
-to nothing would score every mutant `SURVIVED`, so a selection is proven to run
-tests before any mutant is scored against it; the per-selection baseline counts
-land in `baseline.narrow` of the JSON report.
+selection not being green-and-non-empty at its own baseline. A selection that
+runs nothing can kill nothing, so it is proven to run tests before any mutant is
+probed against it, rather than being discovered as a narrow phase that never
+settled anything; the per-selection counts land in `baseline.narrow` of the JSON
+report, which is the probe's "assert the baseline count" rule made sharp — a
+per-file count is small and stable, so a selection matching nothing shows up
+instead of hiding inside a three-figure total.
 
 ## Scan record template
 

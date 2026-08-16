@@ -251,8 +251,9 @@ fn escalates(verdict: &Verdict) -> bool {
 ///
 /// None is a DESIGNED outcome, not an error: where tests do not mirror sources the
 /// derivation fails and the caller falls back to the whole suite. Guessing a path
-/// instead would select nothing and score every mutant SURVIVED — the exact failure
-/// this feature must not introduce.
+/// instead would select nothing — every mutant would clear a narrow phase incapable of
+/// killing it, so the narrowing is pure overhead and the report names a selection that
+/// proved nothing.
 fn derive_selection(file: &str, from: &regex::Regex, to: &str) -> Option<String> {
     let caps = from.captures(file)?;
     let mut selection = String::new();
@@ -565,9 +566,11 @@ NARROW (two-phase probing — optional, verdict-preserving)
       * the derived path does not exist under root -> full suite
       * the selection is not green-and-non-empty at its own baseline
         (0 tests, no proof of a run, red)          -> full suite
-    Each fallback prints its reason. Silently narrowing to nothing would score
-    every mutant SURVIVED, so a selection is proven to run tests before any
-    mutant is scored against it.
+    Each fallback prints its reason, and every usable selection's baseline count
+    lands in the report — the "assert the baseline count" rule made sharp, since
+    a per-file count is small and stable. A selection that runs nothing can kill
+    nothing, so it is proven to run tests before any mutant is probed against it
+    rather than being discovered as a narrow phase that never settled anything.
 
 INTEGRITY (enforced)
     A red, silent, or zero-test baseline aborts before any probe. Writes are
@@ -697,9 +700,14 @@ fn main() {
     println!("baseline: green ({base_passed} passed)");
 
     // Resolve each mutated file's narrow selection ONCE, on the pristine tree, and prove
-    // it green-and-non-empty at its own baseline before any mutant is scored against it.
-    // A selection that runs no tests would score every mutant SURVIVED, so an unproven
-    // selection is not used at all — the file falls back to the whole suite, out loud.
+    // it green-and-non-empty at its own baseline before any mutant is probed against it.
+    // A selection that runs no tests can kill nothing, so every mutant would clear the
+    // narrow phase and escalate — pure overhead, and a report naming a selection that
+    // proved nothing. It is also exactly what a mis-derived selection looks like. So an
+    // unproven selection is not used at all: the file falls back to the whole suite, out
+    // loud. This is the "assert the baseline count" rule made sharp — a per-file count is
+    // small and stable, so a selection matching nothing shows up instead of hiding inside
+    // a three-figure total.
     let mut selection_for: BTreeMap<&str, Option<String>> = BTreeMap::new();
     let mut narrow_baselines: BTreeMap<String, u64> = BTreeMap::new();
     if let (Some(n), Some(from)) = (cfg.suite.narrow.as_ref(), narrow_from.as_ref()) {
@@ -1214,10 +1222,11 @@ mod tests {
     fn a_zero_test_selection_is_refused_by_the_same_baseline_gate() {
         // The gate that stops a narrow selection matching nothing is baseline_defect, so
         // it is the same rule that already blocks a zero-test full suite. A selection
-        // that runs nothing reports 0 passed | 0 failed and exits clean — which
-        // mutant_verdict would score SURVIVED for every mutant.
+        // that runs nothing reports 0 passed | 0 failed and exits clean, which reads as
+        // SURVIVED for every mutant — a narrow phase that can only ever escalate.
         let empty = classify_suite("0 passed | 0 failed", true, &proof());
         assert_eq!(mutant_verdict(&empty, None), Verdict::Survived);
+        assert!(escalates(&mutant_verdict(&empty, None)));
         assert!(baseline_defect(&empty).unwrap().contains("0 tests"));
         // A selection whose command is not understood by the harness proves nothing ran.
         let unsupported = classify_suite("error: unexpected argument --match-path", true, &proof());
