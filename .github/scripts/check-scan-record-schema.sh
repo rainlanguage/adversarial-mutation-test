@@ -64,16 +64,43 @@ for key in commit testsAfterCommit; do
 done
 echo "OK   commit and testsAfterCommit are full 40-character SHAs"
 
-# The template alone only exemplifies the field; the prose around it is what
-# states the rule (which numbers hold at which tree, and that a run landing
-# nothing sets them equal), so the field has to appear outside the fences too.
-prose=$(awk '/^```/ { fenced = !fenced; next } !fenced' "$readme")
-echo "$prose" | grep -q 'testsAfterCommit' ||
-	fail "README.md names testsAfterCommit only inside a code fence — the rule it obeys is unstated"
-echo "OK   README prose states the testsAfterCommit rule"
+# The template exemplifies the field; only the prose states the RULES it obeys,
+# and a record is falsifiable because of the rules, not because of the field. A
+# check that accepted the name alone would pass a README that had kept
+# `testsAfterCommit` in one sentence and dropped every rule attached to it, so
+# each rule is pinned by the shortest phrase that carries it. Reword freely — the
+# failure names which rule went missing, and re-pinning it is a one-line edit.
+readme_prose=$(awk '
+	/^## Scan record template$/ { in_section = 1; next }
+	in_section && /^## / { exit }
+	in_section && /^```/ { fenced = !fenced; next }
+	in_section && !fenced { print }
+' "$readme")
+
+[ -n "$readme_prose" ] || fail "README.md has no prose under '## Scan record template' — only the template"
+
+# Newlines are collapsed first: these documents are reflowed by `deno fmt`, so a
+# phrase may be split across lines at any time and that is not a rule going
+# missing.
+states() {
+	printf '%s' "$2" | tr '\n' ' ' | tr -s ' ' | grep -qF -- "$1" ||
+		fail "$3 no longer states $4 (looked for '$1')"
+}
+
+readme_states() { states "$1" "$readme_prose" "the README scan record prose" "$2"; }
+
+readme_states 'testsAfterCommit' "which field names the tree after-state counts hold at"
+readme_states '_before_' "that before-numbers hold at the scanned commit"
+readme_states '_after_' "that after-numbers hold at testsAfterCommit"
+readme_states '40-character' "that both trees are named by full-length SHAs"
+readme_states 'equal to' "that a run landing nothing sets testsAfterCommit equal to commit"
+readme_states 'never null' "that testsAfterCommit is never null"
+readme_states 'never omitted' "that testsAfterCommit is never omitted"
+echo "OK   README prose states every testsAfterCommit rule"
 
 # SKILL.md is what a run closing its record actually has in front of it. A field
-# documented only in the README is a field campaigns will not write.
+# documented only in the README is a field campaigns will not write, and a rule
+# only the README states is a rule the closing run does not apply.
 section=$(awk '
 	/^## Committed scan record$/ { in_section = 1; next }
 	in_section && /^## / { exit }
@@ -82,8 +109,11 @@ section=$(awk '
 
 [ -n "$section" ] || fail "SKILL.md has no '## Committed scan record' section"
 
-echo "$section" | grep -q 'testsAfterCommit' ||
-	fail "SKILL.md's '## Committed scan record' does not name testsAfterCommit"
-echo "OK   SKILL.md's committed scan record names testsAfterCommit"
+skill_states() { states "$1" "$section" "SKILL.md's '## Committed scan record'" "$2"; }
+
+skill_states 'testsAfterCommit' "which field names the tree after-state counts hold at"
+skill_states 'equal to' "what a run that landed nothing writes"
+skill_states 'never null' "that testsAfterCommit is never null and never omitted"
+echo "OK   SKILL.md's committed scan record states the field and its rules"
 
 echo "scan record schema OK"

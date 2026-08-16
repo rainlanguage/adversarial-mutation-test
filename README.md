@@ -149,7 +149,7 @@ JSON, no comments:
 `timestamp` is UTC at run end; `commit` the exact SHA scanned;
 `testsAfterCommit` the exact SHA the run's own output landed at; `publishedTag`
 the release at `commit` (null if unreleased) with `commitsAheadOfTag` its
-distance. Those four are the must-haves; `summary` is nice-to-have.
+distance. All five are must-haves; `summary` is nice-to-have.
 
 A record spans two trees, and every number in it is measured at one of them:
 `commit` is the tree the scan ran against, which every _before_ number
