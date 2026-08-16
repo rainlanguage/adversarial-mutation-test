@@ -2,10 +2,10 @@
 # The scan-record schema lives in two places — the README's "Scan record
 # template" (canonical) and SKILL.md's "Committed scan record" (what a closing
 # run has in front of it) — and it is documentation, so nothing else in this
-# repo executes it. That is how the schema shipped for 33 versions with no field
-# naming the tree its after-campaign counts hold at: rain.sol.codegen committed
-# "testsAfter": 102, a count occurring at no commit in the range its record
-# covered, and no reader or tool had anything to check it against.
+# repo executes it. That is how it shipped with no field naming the tree its
+# after-campaign counts hold at: rain.sol.codegen committed "testsAfter": 102, a
+# count occurring at no commit in the range its record covered, and no reader or
+# tool had anything to check it against.
 #
 # This pins the parts of the schema a reader needs in order to falsify a record:
 # the template is real JSON, both trees are named, both are full SHAs, and both

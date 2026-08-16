@@ -201,9 +201,9 @@ scope, tool + skill version, summary with filed issue numbers. The org health
 check reads the newest entry for "which release was last audited"; the JSON
 template lives in this repo's README.
 
-Two trees, both full 40-char SHAs: the scanned `commit` is what every *before*
+Two trees, both full 40-char SHAs: the scanned `commit` is what every _before_
 number holds at; `testsAfterCommit` — the tree with this run's coverage PRs
-merged — is what every *after* number in `summary` holds at. An after-count with
+merged — is what every _after_ number in `summary` holds at. An after-count with
 no tree named is unfalsifiable, so `testsAfterCommit` is a must-have alongside
 the scanned commit: a run that landed nothing sets it equal to `commit`, never
 null and never omitted.
