@@ -674,8 +674,12 @@ USAGE
     mutation-probe <mutants.toml> [--json <path>] [--only <substring>]
 
     --json <path>       also write the machine-readable report
-    --only <substring>  probe only mutants whose name contains the substring
-                        (substring match — a broad value selects several)
+    --only <substring>  probe EVERY mutant whose name contains the substring, so a
+                        short value ("M07") also selects longer names ("M070").
+                        Deliberately not exact matching: names carry prose, and
+                        over-selection is fail-safe — the extra mutants are probed
+                        and scored, exit 0 still demands all of them KILLED, and a
+                        value matching nothing is an error, never a silent no-op.
     --help, -h          this manual
 
 MUTANTS FILE (TOML)

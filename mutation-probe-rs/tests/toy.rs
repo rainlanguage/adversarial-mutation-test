@@ -488,3 +488,46 @@ fn only_filter_narrows_the_pass() {
     assert_eq!(report["mutants"].as_array().unwrap().len(), 1);
     let _ = std::fs::remove_dir_all(&dir);
 }
+
+#[test]
+fn only_is_a_substring_filter_so_a_prefix_selects_every_match() {
+    // `--only` matches by SUBSTRING, deliberately: names carry prose, and typing a
+    // whole one exactly is hostile, while over-selection is fail-safe — a wider
+    // match only adds verdicts, and exit 0 still demands that every one of them be
+    // KILLED. This pins both halves against a silent switch to exact matching (which
+    // would select nothing here and abort) or to first-match-wins (which would
+    // report one mutant and exit 0, laundering the survivor out of the pass).
+    let dir = unique_dir("substring");
+    let code = "GUARD on\nCAP 10\nMODE strict\n";
+    toy(&dir, code);
+    let config = write_config(
+        &dir,
+        r#"
+[[mutants]]
+name = "M07 guard off"
+file = "code.txt"
+target = "GUARD on"
+replacement = "GUARD off"
+
+[[mutants]]
+name = "M070 cap unchecked"
+file = "code.txt"
+target = "CAP 10"
+replacement = "CAP 99"
+"#,
+    );
+    let (exit, out, report) = run(&config, &["--only", "M07"]);
+    let mutants = report["mutants"].as_array().unwrap();
+    assert_eq!(
+        mutants.len(),
+        2,
+        "M07 is a substring of both names, so both are probed; output:\n{out}"
+    );
+    assert_eq!(mutants[0]["verdict"].as_str(), Some("KILLED"));
+    assert_eq!(mutants[1]["verdict"].as_str(), Some("SURVIVED"));
+    assert_eq!(
+        exit, 1,
+        "the extra match's survival still fails the pass; output:\n{out}"
+    );
+    let _ = std::fs::remove_dir_all(&dir);
+}

@@ -41,10 +41,19 @@ adversarial pass judges covered behaviors too.
 ## Repo-wide campaign
 
 1. **Survey**: enumerate testable units and existing tests; find gaps with
-   coverage tooling. Zero- and weakly-covered units are highest value.
-2. **Prioritize and group** by risk × coverage gap; a module-sized group of
-   units ships as its own branch + PR (additive test-only PRs are independent
-   and CI-safe).
+   coverage tooling. Zero- and weakly-covered units are highest value. Price
+   each unit in BEHAVIOURS — a unit list without a size term cannot be grouped.
+2. **Prioritize and group** by risk × coverage gap; each group ships as its own
+   branch + PR (additive test-only PRs are independent and CI-safe). **A group
+   is sized by the behaviours it holds, never by "a module / package / coverage
+   area"** — a file is not indivisible, so a unit over one agent's budget is
+   split across groups. Shards of one file are ordinary groups; their PRs append
+   to the same test file, and that textual conflict is far cheaper than a group
+   dying. An over-sized group does not degrade, it DIES: cost is behaviours ×
+   mutants × a probe cycle each, and every test the group adds lengthens the
+   suite its own later probes re-run, so the overrun is not the excess but a
+   handoff plus a successor's re-read. When a unit cannot be priced cheaply,
+   slice smaller — finishing early costs a clone, dying costs an agent.
 3. **Learn the harness once** — build, test, and any artifact-regeneration step
    — BEFORE probing. Regeneration belongs INSIDE the probe's suite command:
    tests that execute a stale artifact test nothing.
@@ -159,9 +168,12 @@ One mutation, one behavior — the failing-test set stays diagnostic.
   or reusing a clone, read `<root>/.mutation-test/probe.lock` — the probe refuses
   a tree a live probe already owns, and names the mutant a dead one left applied.
 - **Orchestrator slices; agents never self-select.** Survey returns a
-  schema-validated list; partition it into explicit disjoint batches in
-  orchestrator code; converge loop-until-dry against a seen-set. Agents editing
-  a shared TODO list is the known failure mode (duplicate work, no convergence).
+  schema-validated list carrying each item's behaviour count — an identity-only
+  list is size-blind, and slicing it cannot honour the sizing rule above.
+  Partition on the BEHAVIOUR axis into explicit disjoint batches in orchestrator
+  code (a 95-behaviour unit is a dozen batches, not one), treating an estimated
+  count as a floor; converge loop-until-dry against a seen-set. Agents editing a
+  shared TODO list is the known failure mode (duplicate work, no convergence).
 - A `null` agent return is a re-dispatch signal, promptly and in parallel — a
   group is either productive or verifiably empty before the run is complete.
   Probe agents run at low effort; kill/adversarial/synthesis at high.
