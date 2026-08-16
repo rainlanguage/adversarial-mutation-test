@@ -81,10 +81,10 @@ adversarial pass judges covered behaviors too.
    `mutation-probe --help` is the manual (file format, verdicts, exit codes).
    The bin enforces probe integrity — green non-empty baseline, proof the suite
    actually ran, exactly-once targets, byte-exact restore, one live probe per
-   tree — so a crashed suite or a no-op mutant can never fake a result. Yours to uphold: **commit before
-   the first probe** (the auditable recovery point), and **keep targets out of
-   test code** — a target in the oracle co-mutates the expectation and voids the
-   probe.
+   tree — so a crashed suite or a no-op mutant can never fake a result. Yours to
+   uphold: **commit before the first probe** (the auditable recovery point), and
+   **keep targets out of test code** — a target in the oracle co-mutates the
+   expectation and voids the probe.
 4. **Act on verdicts.** KILLED = covered: credit the killing test in the ledger.
    SURVIVED = a real gap: if an existing test purports to cover the behavior,
    strengthen it in place until it kills the mutant; otherwise add a new test.
