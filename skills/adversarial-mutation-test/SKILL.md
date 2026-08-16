@@ -165,8 +165,9 @@ One mutation, one behavior — the failing-test set stays diagnostic.
   each other, never a worker from its own orphans: an agent that dies mid-pass
   leaves `mutation-probe` running until its mutants are done, and a missing
   report reads exactly like a pass that never started. Before re-running a pass
-  or reusing a clone, read `<root>/.mutation-test/probe.lock` — the probe refuses
-  a tree a live probe already owns, and names the mutant a dead one left applied.
+  or reusing a clone, read `<root>/.mutation-test/probe.lock` — the probe
+  refuses a tree a live probe already owns, and names the mutant a dead one left
+  applied.
 - **Orchestrator slices; agents never self-select.** Survey returns a
   schema-validated list carrying each item's behaviour count — an identity-only
   list is size-blind, and slicing it cannot honour the sizing rule above.
