@@ -42,7 +42,8 @@ the eventualities".
 
 - **Surveys** the repo, inventories testable units and existing tests, and finds
   the gaps (coverage tooling + mutation probing).
-- **Groups** the work into logical modules, each shipped as its own branch + PR.
+- **Groups** the work by the behaviours each group contains — not by module — and
+  ships each group as its own branch + PR.
 - Runs a per-unit loop: enumerate behaviors → baseline green → break *every*
   behavior with one targeted mutation against the **pre-existing** suite, before
   writing anything → credit by name each existing test that catches one → then
