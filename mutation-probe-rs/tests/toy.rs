@@ -349,6 +349,38 @@ replacement = "GUARD off"
 }
 
 #[test]
+fn a_pass_with_no_fail_pattern_at_all_is_not_nagged() {
+    // fail-pattern is optional. A config that never asked for killer attribution has
+    // no blank column to complain about, and saying so per kill would train the
+    // reader to ignore the line that matters when a pattern IS configured.
+    let dir = unique_dir("nopattern");
+    toy(&dir, "GUARD on\nCAP 10\nMODE strict\n");
+    let config = r#"
+[suite]
+root = "."
+command = ["sh", "check.sh"]
+proof = '(\d+) passed \| (\d+) failed'
+timeout-secs = 60
+
+[[mutants]]
+name = "M-kill guard off"
+file = "code.txt"
+target = "GUARD on"
+replacement = "GUARD off"
+"#;
+    let path = dir.join("mutants.toml");
+    std::fs::write(&path, config).unwrap();
+    let (exit, out, report) = run(&path, &[]);
+    assert_eq!(exit, 0, "output:\n{out}");
+    assert_eq!(report["mutants"][0]["verdict"].as_str(), Some("KILLED"));
+    assert!(
+        !out.contains("NOT NAMED"),
+        "nothing was asked for, so nothing is missing:\n{out}"
+    );
+    let _ = std::fs::remove_dir_all(&dir);
+}
+
+#[test]
 fn a_named_harness_replaces_the_hand_written_patterns() {
     // The toy suite emits cargo-shaped result lines, so `harness = "cargo"` alone —
     // no proof, no fail-pattern — must drive a full pass and name the killer.

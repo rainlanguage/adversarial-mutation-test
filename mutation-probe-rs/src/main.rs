@@ -1121,15 +1121,21 @@ mod tests {
         let (proof, fp) = shipped("cargo");
         match classify_suite(CARGO_RED, false, &proof) {
             SuiteOutcome::Ran { passed, failed, .. } => {
-                // lib 1+1, integration 1+1, doctest 1+0 — the tallies sum across
+                // lib 1+1, integration 1+1, doctests 1+1 — the tallies sum across
                 // every target, which is why one proof works for a cargo workspace.
-                assert_eq!((passed, failed), (3, 2));
+                assert_eq!((passed, failed), (3, 3));
             }
             other => panic!("expected Ran, got {other:?}"),
         }
         assert_eq!(
             captured_names(CARGO_RED, &fp),
-            vec!["tests::unit_fails_multiline", "integration_fails"]
+            vec![
+                "tests::unit_fails_multiline",
+                "integration_fails",
+                // A doctest's libtest name contains spaces, so `(\S+)` would capture
+                // "src/lib.rs" and name a test that does not exist.
+                "src/lib.rs - three (line 11)",
+            ]
         );
         match classify_suite(CARGO_GREEN, true, &proof) {
             SuiteOutcome::Ran { passed, failed, .. } => assert_eq!((passed, failed), (1, 0)),
