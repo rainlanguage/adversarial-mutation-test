@@ -279,3 +279,311 @@ fn only_filter_narrows_the_pass() {
     assert_eq!(report["mutants"].as_array().unwrap().len(), 1);
     let _ = std::fs::remove_dir_all(&dir);
 }
+
+// ------------------------------------------- two-phase (narrow) probing ----
+//
+// A second toy, laid out so every branch of the derivation is a real repo shape:
+//
+//   src/guard.txt  -> test/guard.t.sh   exists, and its tests kill the guard mutant
+//   src/mode.txt   -> test/mode.t.sh    exists, but the killer lives in guard.t.sh
+//   src/cap.txt    -> test/cap.t.sh     ABSENT: tests do not mirror this source
+//   src/flag.txt   -> test/flag.t.sh    exists but selects NO tests; its killer is
+//                                       in guard.t.sh, so a probe that trusted the
+//                                       empty selection would score a false gap
+//
+// The suite writes every invocation's selection to runs.log, so the tests can assert
+// which runs actually happened rather than inferring it from the verdict.
+
+const NARROW_CHECK_SH: &str = r#"
+sel="$1"
+echo "${sel:-FULL}" >> runs.log
+p=0; f=0
+guard=0; cap=0; mode=0
+case "$sel" in
+  "") guard=1; cap=1; mode=1 ;;
+  test/guard.t.sh) guard=1 ;;
+  test/cap.t.sh) cap=1 ;;
+  test/mode.t.sh) mode=1 ;;
+esac
+if [ "$guard" = 1 ]; then
+  if grep -q "GUARD on" src/guard.txt; then echo "guard_test ... ok"; p=$((p+1)); else echo "guard_test ... FAILED"; f=$((f+1)); fi
+  if grep -q "MODE strict" src/mode.txt; then echo "mode_cross_test ... ok"; p=$((p+1)); else echo "mode_cross_test ... FAILED"; f=$((f+1)); fi
+  if grep -q "FLAG on" src/flag.txt; then echo "flag_cross_test ... ok"; p=$((p+1)); else echo "flag_cross_test ... FAILED"; f=$((f+1)); fi
+fi
+if [ "$cap" = 1 ]; then echo "cap_test ... ok"; p=$((p+1)); fi
+if [ "$mode" = 1 ]; then echo "mode_smoke_test ... ok"; p=$((p+1)); fi
+echo "$p passed | $f failed"
+[ "$f" -eq 0 ] || exit 1
+"#;
+
+const NARROW_MUTANTS: &str = r#"
+[[mutants]]
+name = "M-narrow guard off"
+file = "src/guard.txt"
+target = "GUARD on"
+replacement = "GUARD off"
+
+[[mutants]]
+name = "M-escalate mode loose"
+file = "src/mode.txt"
+target = "MODE strict"
+replacement = "MODE loose"
+
+[[mutants]]
+name = "M-nomirror cap raised"
+file = "src/cap.txt"
+target = "CAP 10"
+replacement = "CAP 99"
+
+[[mutants]]
+name = "M-emptysel flag off"
+file = "src/flag.txt"
+target = "FLAG on"
+replacement = "FLAG off"
+"#;
+
+/// The toy repo plus a `[suite.narrow]` config; returns the mutants file's path.
+fn narrow_toy(dir: &Path) -> PathBuf {
+    std::fs::create_dir_all(dir.join("src")).unwrap();
+    std::fs::create_dir_all(dir.join("test")).unwrap();
+    std::fs::write(dir.join("src/guard.txt"), "GUARD on\n").unwrap();
+    std::fs::write(dir.join("src/mode.txt"), "MODE strict\n").unwrap();
+    std::fs::write(dir.join("src/cap.txt"), "CAP 10\n").unwrap();
+    std::fs::write(dir.join("src/flag.txt"), "FLAG on\n").unwrap();
+    // test/cap.t.sh is deliberately NOT created.
+    for t in ["test/guard.t.sh", "test/mode.t.sh", "test/flag.t.sh"] {
+        std::fs::write(dir.join(t), "# selected by name; the suite dispatches\n").unwrap();
+    }
+    std::fs::write(dir.join("check.sh"), NARROW_CHECK_SH).unwrap();
+    let config = format!(
+        r#"
+[suite]
+root = "."
+command = ["sh", "check.sh"]
+proof = '(\d+) passed \| (\d+) failed'
+fail-pattern = '(\S+) \.\.\. FAILED'
+timeout-secs = 60
+
+[suite.narrow]
+from = '^src/(.*)\.txt$'
+to = 'test/$1.t.sh'
+command = ["sh", "check.sh", "{{}}"]
+{NARROW_MUTANTS}
+"#
+    );
+    let path = dir.join("mutants.toml");
+    std::fs::write(&path, config).unwrap();
+    path
+}
+
+/// Every suite invocation, in order, as the toy recorded them ("FULL" = whole suite).
+fn runs(dir: &Path) -> Vec<String> {
+    std::fs::read_to_string(dir.join("runs.log"))
+        .unwrap_or_default()
+        .lines()
+        .map(str::to_string)
+        .collect()
+}
+
+#[test]
+fn a_narrow_kill_settles_without_ever_running_the_whole_suite() {
+    let dir = unique_dir("narrow-kill");
+    let config = narrow_toy(&dir);
+    let (exit, out, report) = run(&config, &["--only", "M-narrow guard"]);
+    assert_eq!(exit, 0, "a killed mutant exits 0; output:\n{out}");
+
+    let m = &report["mutants"][0];
+    assert_eq!(m["verdict"].as_str(), Some("KILLED"));
+    assert_eq!(m["phase"].as_str(), Some("narrow"));
+    assert_eq!(m["selection"].as_str(), Some("test/guard.t.sh"));
+    assert_eq!(m["killed_by"][0].as_str(), Some("guard_test"));
+    assert_eq!(report["summary"]["narrow_settled"].as_u64(), Some(1));
+    assert_eq!(
+        report["baseline"]["narrow"]["test/guard.t.sh"].as_u64(),
+        Some(3),
+        "the selection's own baseline count is recorded, so a selection that \
+         silently matched nothing would be visible as a small wrong number"
+    );
+
+    // The saving is the claim, so assert it directly rather than trusting `phase`.
+    assert_eq!(
+        runs(&dir),
+        vec!["FULL", "test/guard.t.sh", "test/guard.t.sh"],
+        "one full baseline, one narrow baseline, one narrow probe — the whole \
+         suite never ran for the mutant itself"
+    );
+    let _ = std::fs::remove_dir_all(&dir);
+}
+
+#[test]
+fn an_apparent_survival_escalates_to_the_whole_suite_and_is_killed_there() {
+    // The reason the whole suite was mandatory: a mutant killed by a test you did not
+    // predict. test/mode.t.sh passes under the mutant; the killer is in guard.t.sh.
+    let dir = unique_dir("narrow-escalate");
+    let config = narrow_toy(&dir);
+    let (exit, out, report) = run(&config, &["--only", "M-escalate"]);
+    assert_eq!(
+        exit, 0,
+        "the escalated run finds the killer, so the pass is all-killed; output:\n{out}"
+    );
+
+    let m = &report["mutants"][0];
+    assert_eq!(
+        m["verdict"].as_str(),
+        Some("KILLED"),
+        "narrowing must not turn an unpredicted killer into a false gap"
+    );
+    assert_eq!(m["phase"].as_str(), Some("full"));
+    assert_eq!(
+        m["selection"].as_str(),
+        Some("test/mode.t.sh"),
+        "a selection with phase=full reads as 'narrow ran and was escalated'"
+    );
+    assert_eq!(m["killed_by"][0].as_str(), Some("mode_cross_test"));
+    assert_eq!(report["summary"]["narrow_settled"].as_u64(), Some(0));
+    assert_eq!(
+        runs(&dir),
+        vec!["FULL", "test/mode.t.sh", "test/mode.t.sh", "FULL"],
+        "the apparent survival is re-taken against the whole suite BEFORE it is recorded"
+    );
+    let _ = std::fs::remove_dir_all(&dir);
+}
+
+#[test]
+fn a_source_with_no_mirrored_test_falls_back_to_the_whole_suite() {
+    let dir = unique_dir("narrow-nomirror");
+    let config = narrow_toy(&dir);
+    let (exit, out, report) = run(&config, &["--only", "M-nomirror"]);
+    assert_eq!(exit, 1, "a genuine survivor exits 1; output:\n{out}");
+
+    let m = &report["mutants"][0];
+    assert_eq!(m["verdict"].as_str(), Some("SURVIVED"));
+    assert_eq!(m["phase"].as_str(), Some("full"));
+    assert!(
+        m["selection"].is_null(),
+        "no selection was derivable, so none is claimed"
+    );
+    assert!(
+        out.contains("test/cap.t.sh does not exist"),
+        "the fallback names its reason rather than narrowing silently:\n{out}"
+    );
+    assert_eq!(
+        runs(&dir),
+        vec!["FULL", "FULL"],
+        "no narrow run at all — the whole suite decided this one"
+    );
+    let _ = std::fs::remove_dir_all(&dir);
+}
+
+#[test]
+fn a_selection_that_runs_no_tests_is_refused_instead_of_scoring_a_false_gap() {
+    // test/flag.t.sh EXISTS, so the path check passes, but selecting it runs nothing.
+    // Probing against it would report 0 passed | 0 failed — SURVIVED — for a behavior
+    // the whole suite covers. The selection's own baseline is what catches that.
+    let dir = unique_dir("narrow-empty");
+    let config = narrow_toy(&dir);
+    let (exit, out, report) = run(&config, &["--only", "M-emptysel"]);
+    assert_eq!(exit, 0, "the whole suite kills it; output:\n{out}");
+
+    let m = &report["mutants"][0];
+    assert_eq!(
+        m["verdict"].as_str(),
+        Some("KILLED"),
+        "silently narrowing to nothing would have scored this SURVIVED"
+    );
+    assert_eq!(m["phase"].as_str(), Some("full"));
+    assert!(m["selection"].is_null());
+    assert!(
+        report["baseline"]["narrow"].is_null(),
+        "a refused selection is not recorded as a usable narrow baseline"
+    );
+    assert!(
+        out.contains("0 tests"),
+        "the refusal names the empty selection:\n{out}"
+    );
+    assert_eq!(
+        runs(&dir),
+        vec!["FULL", "test/flag.t.sh", "FULL"],
+        "the selection is tried ONCE at baseline, then abandoned for the whole suite"
+    );
+    let _ = std::fs::remove_dir_all(&dir);
+}
+
+#[test]
+fn one_narrow_baseline_serves_every_mutant_on_the_same_file() {
+    let dir = unique_dir("narrow-shared-baseline");
+    std::fs::create_dir_all(dir.join("src")).unwrap();
+    std::fs::create_dir_all(dir.join("test")).unwrap();
+    std::fs::write(dir.join("src/guard.txt"), "GUARD on\n").unwrap();
+    std::fs::write(dir.join("src/mode.txt"), "MODE strict\n").unwrap();
+    std::fs::write(dir.join("src/cap.txt"), "CAP 10\n").unwrap();
+    std::fs::write(dir.join("src/flag.txt"), "FLAG on\n").unwrap();
+    std::fs::write(dir.join("test/guard.t.sh"), "#\n").unwrap();
+    std::fs::write(dir.join("check.sh"), NARROW_CHECK_SH).unwrap();
+    let config = r#"
+[suite]
+root = "."
+command = ["sh", "check.sh"]
+proof = '(\d+) passed \| (\d+) failed'
+timeout-secs = 60
+
+[suite.narrow]
+from = '^src/(.*)\.txt$'
+to = 'test/$1.t.sh'
+command = ["sh", "check.sh", "{}"]
+
+[[mutants]]
+name = "M-a guard off"
+file = "src/guard.txt"
+target = "GUARD on"
+replacement = "GUARD off"
+
+[[mutants]]
+name = "M-b guard absent"
+file = "src/guard.txt"
+target = "GUARD"
+replacement = "SENTRY"
+"#;
+    let path = dir.join("mutants.toml");
+    std::fs::write(&path, config).unwrap();
+
+    let (exit, out, report) = run(&path, &[]);
+    assert_eq!(exit, 0, "both mutants are killed narrowly; output:\n{out}");
+    assert_eq!(report["summary"]["narrow_settled"].as_u64(), Some(2));
+    assert_eq!(
+        runs(&dir),
+        vec![
+            "FULL",
+            "test/guard.t.sh",
+            "test/guard.t.sh",
+            "test/guard.t.sh"
+        ],
+        "the selection is baselined once per file, not once per mutant"
+    );
+    let _ = std::fs::remove_dir_all(&dir);
+}
+
+#[test]
+fn a_narrow_command_that_ignores_the_selection_is_a_config_error() {
+    let dir = unique_dir("narrow-noplaceholder");
+    let config = narrow_toy(&dir);
+    let broken = std::fs::read_to_string(&config).unwrap().replace(
+        r#"command = ["sh", "check.sh", "{}"]"#,
+        r#"command = ["sh", "check.sh"]"#,
+    );
+    std::fs::write(&config, broken).unwrap();
+    let (exit, out, _) = run(&config, &[]);
+    assert_eq!(
+        exit, 2,
+        "a config that cannot narrow must not run; output:\n{out}"
+    );
+    assert!(
+        out.contains("placeholder"),
+        "the error names the missing selection slot:\n{out}"
+    );
+    assert!(
+        runs(&dir).is_empty(),
+        "the config is rejected before any suite runs"
+    );
+    let _ = std::fs::remove_dir_all(&dir);
+}

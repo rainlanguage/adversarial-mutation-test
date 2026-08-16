@@ -1,6 +1,6 @@
 ---
 name: adversarial-mutation-test
-version: 0.31.0
+version: 0.32.0
 description: Use to systematically find BUGS in and harden the test suite for a WHOLE repository (or a whole module of it). Two co-equal goals the name carries: ADVERSARIAL (treat spec/intent as the oracle and the code as suspect — derive expected behavior independently and hunt for inputs where the code is wrong) and MUTATION (prove tests cover the code). Mutation-drives a behavior-centric coverage ledger — for each behavior, break the line and check the whole suite: existing tests that kill the mutant are validated and logged (so existing coverage is audited and in scope), and only surviving mutants (real gaps) get a new discriminating test. An existing test that already kills mutants is left as-is; one meant to cover a behavior but that a mutant survives is strengthened in place (not duplicated); one broken on the unmutated baseline is fixed or its underlying code bug surfaced; a test is never edited to swallow a mutation. Designed for long campaigns that outlive the context window: progress lives in a durable gitignored scratch file so it survives compaction. A single change/PR/function is just a narrowed scope. Triggers on "test the whole repo", "harden the test suite", "mutation test the codebase", "audit the tests", "adversarial tests", "prove these tests cover the code", "exhaust the eventualities".
 ---
 
@@ -76,6 +76,21 @@ adversarial pass judges covered behaviors too.
    the first probe** (the auditable recovery point), and **keep targets out of
    test code** — a target in the oracle co-mutates the expectation and voids the
    probe.
+
+   **Add a `[suite.narrow]` block whenever the repo's tests mirror its
+   sources.** The probe then runs the mutated file's own tests first and reaches
+   for the whole suite only when that fails to prove a kill. A kill is proof —
+   the selection is a subset, so its failing test fails in the full run too —
+   while only an apparent SURVIVAL claims no test anywhere caught the mutant,
+   and that claim is always re-taken against the whole suite before it is
+   recorded. Kills are the common case (143 mutants across three real passes;
+   one needed the escalation), and full-suite-per-mutant is the dominant cost of
+   a campaign — one that grows the suite from 9 tests to 102 has made its last
+   probe an order of magnitude dearer than its first. The selection is DERIVED
+   from the path, never hand-listed; where the tests do not mirror the sources,
+   or the selection runs no tests, the probe falls back to the whole suite and
+   says so, because silently narrowing to nothing would score every mutant
+   SURVIVED.
 4. **Act on verdicts.** KILLED = covered: credit the killing test in the ledger.
    SURVIVED = a real gap: if an existing test purports to cover the behavior,
    strengthen it in place until it kills the mutant; otherwise add a new test.
