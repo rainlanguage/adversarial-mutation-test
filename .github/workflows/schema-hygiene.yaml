@@ -1,0 +1,17 @@
+name: schema hygiene
+on: [push, pull_request]
+permissions:
+  contents: read
+jobs:
+  # The scan-record schema is documentation, so nothing else in this repo runs
+  # it. Kept separate from version hygiene so a red here means "the schema
+  # consumers copy is broken", not "a version pointer drifted".
+  scan-record-schema:
+    runs-on: ubuntu-latest
+    timeout-minutes: 5
+    steps:
+      - uses: actions/checkout@34e114876b0b11c390a56381ad16ebd13914f8d5 # v4
+        with:
+          persist-credentials: false
+      - name: scan record template conforms to the schema it documents
+        run: sh .github/scripts/check-scan-record-schema.sh

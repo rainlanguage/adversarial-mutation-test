@@ -1,6 +1,6 @@
 ---
 name: adversarial-mutation-test
-version: 0.33.0
+version: 0.34.0
 description: Use to systematically find BUGS in and harden the test suite for a WHOLE repository (or a whole module of it). Two co-equal goals the name carries: ADVERSARIAL (treat spec/intent as the oracle and the code as suspect — derive expected behavior independently and hunt for inputs where the code is wrong) and MUTATION (prove tests cover the code). Mutation-drives a behavior-centric coverage ledger — for each behavior, break the line and check the whole suite: existing tests that kill the mutant are validated and logged (so existing coverage is audited and in scope), and only surviving mutants (real gaps) get a new discriminating test. An existing test that already kills mutants is left as-is; one meant to cover a behavior but that a mutant survives is strengthened in place (not duplicated); one broken on the unmutated baseline is fixed or its underlying code bug surfaced; a test is never edited to swallow a mutation. Designed for long campaigns that outlive the context window: progress lives in a durable gitignored scratch file so it survives compaction. A single change/PR/function is just a narrowed scope. Triggers on "test the whole repo", "harden the test suite", "mutation test the codebase", "audit the tests", "adversarial tests", "prove these tests cover the code", "exhaust the eventualities".
 ---
 
@@ -196,10 +196,17 @@ One mutation, one behavior — the failing-test set stays diagnostic.
 
 Close every run — including a clean one — by appending an entry to a committed
 `audit/mutation-test-scans.json` and landing it on the default branch:
-timestamp, scanned commit, published tag (+ commits ahead), scope, tool + skill
-version, summary with filed issue numbers. The org health check reads the newest
-entry for "which release was last audited"; the JSON template lives in this
-repo's README.
+timestamp, scanned commit, `testsAfterCommit`, published tag (+ commits ahead),
+scope, tool + skill version, summary with filed issue numbers. The org health
+check reads the newest entry for "which release was last audited"; the JSON
+template lives in this repo's README.
+
+Two trees, both full 40-char SHAs: the scanned `commit` is what every *before*
+number holds at; `testsAfterCommit` — the tree with this run's coverage PRs
+merged — is what every *after* number in `summary` holds at. An after-count with
+no tree named is unfalsifiable, so `testsAfterCommit` is a must-have alongside
+the scanned commit: a run that landed nothing sets it equal to `commit`, never
+null and never omitted.
 
 ## Principles
 
