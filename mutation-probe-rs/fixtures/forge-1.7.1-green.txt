@@ -1,0 +1,8 @@
+No files changed, compilation skipped
+
+Ran 2 tests for test/Evidence.t.sol:EvidenceTest
+[PASS] testAppliedIsIdempotent() (gas: 266)
+[PASS] testHeadGenesisIsNotZero() (gas: 212)
+Suite result: ok. 2 passed; 0 failed; 0 skipped; finished in 325.01µs (152.22µs CPU time)
+
+Ran 1 test suite in 4.38ms (325.01µs CPU time): 2 tests passed, 0 failed, 0 skipped (2 total tests)

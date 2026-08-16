@@ -1,0 +1,81 @@
+   Compiling cargo-toy v0.0.0 (/home/gildlab/code/amt-issue-13-forge-evidence/cargo-toy)
+    Finished `test` profile [unoptimized + debuginfo] target(s) in 0.18s
+     Running unittests src/lib.rs (target/debug/deps/cargo_toy-9851a04534560ea2)
+
+running 2 tests
+test tests::unit_passes ... ok
+test tests::unit_fails_multiline ... FAILED
+
+failures:
+
+---- tests::unit_fails_multiline stdout ----
+
+thread 'tests::unit_fails_multiline' (284639) panicked at src/lib.rs:27:9:
+assertion `left == right` failed: generated source differs:
+line one
+line two
+  left: "a\nb\nc"
+ right: "a\nb\nd"
+note: run with `RUST_BACKTRACE=1` environment variable to display a backtrace
+
+
+failures:
+    tests::unit_fails_multiline
+
+test result: FAILED. 1 passed; 1 failed; 0 ignored; 0 measured; 0 filtered out; finished in 0.00s
+
+error: test failed, to rerun pass `--lib`
+     Running tests/integration.rs (target/debug/deps/integration-4de883e90258a294)
+
+running 2 tests
+test integration_fails ... FAILED
+test integration_passes ... ok
+
+failures:
+
+---- integration_fails stdout ----
+
+thread 'integration_fails' (284642) panicked at tests/integration.rs:8:5:
+assertion `left == right` failed
+  left: 1
+ right: 2
+note: run with `RUST_BACKTRACE=1` environment variable to display a backtrace
+
+
+failures:
+    integration_fails
+
+test result: FAILED. 1 passed; 1 failed; 0 ignored; 0 measured; 0 filtered out; finished in 0.00s
+
+error: test failed, to rerun pass `--test integration`
+   Doc-tests cargo_toy
+
+running 2 tests
+test src/lib.rs - two (line 2) ... ok
+test src/lib.rs - three (line 11) ... FAILED
+
+failures:
+
+---- src/lib.rs - three (line 11) stdout ----
+Test executable failed (exit status: 101).
+
+stderr:
+
+thread 'main' (284702) panicked at src/lib.rs:5:1:
+assertion `left == right` failed
+  left: 3
+ right: 4
+note: run with `RUST_BACKTRACE=1` environment variable to display a backtrace
+
+
+
+failures:
+    src/lib.rs - three (line 11)
+
+test result: FAILED. 1 passed; 1 failed; 0 ignored; 0 measured; 0 filtered out; finished in 0.12s
+
+error: doctest failed, to rerun pass `--doc`
+error: 3 targets failed:
+    `--lib`
+    `--test integration`
+    `--doc`

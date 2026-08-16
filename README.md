@@ -83,17 +83,16 @@ nix run github:rainlanguage/adversarial-mutation-test#mutation-probe -- mutants.
 
 `mutation-probe --help` is the complete manual. The short form: the mutants file
 names the suite command as argv (artifact regeneration included — the probe runs
-exactly that per verdict), a proof-of-run regex reading the suite's own
-pass/fail tally, and the mutants as exact-string `(file, target, replacement)`
-triples that must match exactly once.
+exactly that per verdict), the harness whose output it should read, and the
+mutants as exact-string `(file, target, replacement)` triples that must match
+exactly once.
 
 ```toml
 [suite]
 root = "."
 command = ["nix", "develop", "-c", "cargo", "test"]
-proof = '(\d+) passed; (\d+) failed'
-fail-pattern = 'test (\S+) \.\.\. FAILED'   # optional: names the killer
-timeout-secs = 1800                          # optional
+harness = "cargo"   # or "forge" — supplies proof + fail-pattern
+timeout-secs = 1800 # optional
 
 [[mutants]]
 name = "M01 guard inverted"
@@ -102,15 +101,28 @@ target = "if !ok {"
 replacement = "if ok {"
 ```
 
+`harness` exists because the two regexes it stands in for — a proof-of-run over
+the suite's own pass/fail tally, and a `fail-pattern` naming the test that
+killed a mutant — describe a harness's OUTPUT FORMAT, not a repo. Written per
+campaign they get written wrong the same two ways: too wide, matching passing
+result lines so that mutants are credited to tests which cannot kill them; or
+too narrow, matching nothing and emptying the killer column without ever saying
+so. Both are still available (`proof`, `fail-pattern`) and override the
+harness's, and the probe now aborts on the first class — a fail-pattern that
+captures anything from the GREEN baseline is matching passing lines by
+construction — and prints `killer NOT NAMED` per kill for the second.
+
 Verdicts: `KILLED` (failing tally, or non-zero exit with proof of a run) /
 `SURVIVED` (ran green: a real gap) / `NO-RUN` (no proof the suite ran — crash,
 compile error, timeout — never scored as survived) / `HARNESS-ERROR` (target not
-matched exactly once). A red, silent, or zero-test baseline aborts before any
-probe; writes are atomic and every restore is verified byte-exact; a hung
-suite's whole process group is killed at `timeout-secs`. Exit 0 only when every
-probed mutant is killed; 1 on any non-kill; 2 when the pass cannot be trusted.
-`--only <substring>` re-runs a subset while strengthening a killer;
-`--json <path>` writes the machine-readable report.
+matched exactly once). None of them is read from `fail-pattern`: a broken
+pattern degrades attribution and never the verdict. A red, silent, or zero-test
+baseline aborts before any probe; writes are atomic and every restore is
+verified byte-exact; a hung suite's whole process group is killed at
+`timeout-secs`. Exit 0 only when every probed mutant is killed; 1 on any
+non-kill; 2 when the pass cannot be trusted. `--only <substring>` re-runs a
+subset while strengthening a killer; `--json <path>` writes the machine-readable
+report.
 
 ## Scan record template
 
