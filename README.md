@@ -44,9 +44,10 @@ the eventualities".
   the gaps (coverage tooling + mutation probing).
 - **Groups** the work by the behaviours each group contains — not by module — and
   ships each group as its own branch + PR.
-- Runs a per-unit loop: enumerate behaviors → baseline → break each behavior with
-  one targeted mutation → run the whole suite → credit the existing test that
-  catches it, or add/strengthen a test for a surviving mutant.
+- Runs a per-unit loop: enumerate behaviors → baseline green → break *every*
+  behavior with one targeted mutation against the **pre-existing** suite, before
+  writing anything → credit by name each existing test that catches one → then
+  work the survivors, which are the worklist, with new or strengthened tests.
 - **Never edits a test to pass under a mutation** (that would encode the bug);
   strengthens weak tests in place, fixes legitimately broken baseline tests, and
   surfaces real code bugs.
@@ -58,12 +59,18 @@ the eventualities".
 1. Enumerate behaviors (each guard, comparison, computation, side-effect,
    early-return, error path).
 2. Baseline the existing suite green.
-3. Probe each behavior with one targeted mutation, made live in whatever the
-   tests actually execute (regenerate any built/cached/generated/etched artifact
-   first — stale artifacts are the #1 way mutation testing lies to you).
-4. A test fails → behavior covered. No test fails → a real gap → add or
-   strengthen a discriminating test until it fails under the mutation.
-5. Restore the mutation; record the result.
+3. Probe *every* enumerated behavior with one targeted mutation, against the
+   **pre-existing** suite and before writing any test of your own — each mutation
+   made live in whatever the tests actually execute (regenerate any
+   built/cached/generated/etched artifact first — stale artifacts are the #1 way
+   mutation testing lies to you), restoring the source after each probe.
+4. A test fails → behavior covered, credited to that named test. No test fails →
+   the mutant survived → a real gap.
+5. Once that pass is complete, the survivors are the worklist: add or strengthen
+   a discriminating test until it fails under the mutation. Writing one before
+   the pass finishes forfeits the attribution — recovering it costs a second
+   clone at the base commit and a second full mutation pass.
+6. Record the result.
 
 See [`skills/adversarial-mutation-test/SKILL.md`](skills/adversarial-mutation-test/SKILL.md)
 for the full method.
