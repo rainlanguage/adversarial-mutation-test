@@ -109,6 +109,9 @@ const HARNESSES: &[Harness] = &[
         // the start of a continuation line (multi-line message), by the tail of a
         // continuation line, or by one space (invariant). A `[PASS]`/`[SKIP]` line
         // reaches none of those: the alternation admits a leading `[` only for `[FAIL`.
+        // The trailing `(args) (gas:|runs:` pins the name to a RESULT line, which is
+        // what keeps `-vvv` traces out: `← [Revert] Custom(1, 2)` is `] name(` too, and
+        // without the anchor a reverting contract's error is named as the killer.
         fail_pattern: r"(?m)^(?:(?:(?:\[FAIL|[^\[\n])[^\n]*?)?\] | )(\w+)\([^\n]*\) \((?:gas|runs):",
     },
     Harness {
@@ -1048,8 +1051,14 @@ mod tests {
     // (name on a later line after a [Sequence] block), and forge's `Failing tests:`
     // recap, which prints every failure a second time.
     //
+    // The `-red-traces` pair is the same run at `-vvv`, which campaigns routinely use
+    // and which prints call traces the pattern must walk past: `└─ ← [Revert] Custom(1,
+    // 2)` is a `] name(` with nothing after it, so only the trailing `(args) (gas:|runs:`
+    // anchor stops a contract's custom error being named as the killing test.
+    //
     //   forge-1.7.1-*         forge 1.7.1, `forge test --offline [--fuzz-seed 1]`
     //   forge-1.0.0-nightly-* forge 1.0.0-nightly, same, `--color never`
+    //   *-red-traces          the same red run again with `-vvv`
     //   cargo-1.95.0-red      cargo 1.95.0, `cargo test --no-fail-fast --color never`
     //   cargo-1.95.0-green    the same, filtered to the passing test
     //
@@ -1058,6 +1067,9 @@ mod tests {
     const FORGE_GREEN: &str = include_str!("../fixtures/forge-1.7.1-green.txt");
     const FORGE_RED: &str = include_str!("../fixtures/forge-1.7.1-red.txt");
     const FORGE_OLD_RED: &str = include_str!("../fixtures/forge-1.0.0-nightly-red.txt");
+    const FORGE_RED_TRACES: &str = include_str!("../fixtures/forge-1.7.1-red-traces.txt");
+    const FORGE_OLD_RED_TRACES: &str =
+        include_str!("../fixtures/forge-1.0.0-nightly-red-traces.txt");
     const CARGO_GREEN: &str = include_str!("../fixtures/cargo-1.95.0-green.txt");
     const CARGO_RED: &str = include_str!("../fixtures/cargo-1.95.0-red.txt");
 
@@ -1103,12 +1115,21 @@ mod tests {
     #[test]
     fn shipped_forge_fail_pattern_names_every_failure_and_no_passing_test() {
         let (_, fp) = shipped("forge");
-        for (fixture, label) in [(FORGE_RED, "1.7.1"), (FORGE_OLD_RED, "1.0.0-nightly")] {
+        // The `-vvv` pair carries a shape the default-verbosity pair cannot: a trace
+        // line `└─ ← [Revert] Custom(1, 2)`, which is `] name(` with no metrics after
+        // it. Nothing but the trailing `(args) (gas:|runs:` anchor keeps a reverting
+        // contract's custom error out of the killer column.
+        for (fixture, label) in [
+            (FORGE_RED, "1.7.1"),
+            (FORGE_OLD_RED, "1.0.0-nightly"),
+            (FORGE_RED_TRACES, "1.7.1 -vvv"),
+            (FORGE_OLD_RED_TRACES, "1.0.0-nightly -vvv"),
+        ] {
             assert_eq!(
                 captured_names(fixture, &fp),
                 FORGE_KILLERS,
-                "forge {label}: every failing test, once each — forge prints them twice, \
-                 and the run's own summary says 7"
+                "forge {label}: every failing test, once each, and nothing that is not a \
+                 test — forge prints each failure twice, and the run's own summary says 7"
             );
         }
         // …and the green run, which is nothing but [PASS] lines, yields none.

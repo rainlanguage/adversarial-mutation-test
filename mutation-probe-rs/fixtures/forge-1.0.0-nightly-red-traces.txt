@@ -1,0 +1,146 @@
+Warning: This is a nightly build of Foundry. It is recommended to use the latest stable version. Visit https://book.getfoundry.sh/announcements for more information. 
+To mute this warning set `FOUNDRY_DISABLE_NIGHTLY_WARNING` in your environment. 
+
+Compiling 22 files with Solc 0.8.25
+Solc 0.8.25 finished in 653.36ms
+Compiler run successful!
+proptest: Saving this and future failures in cache/fuzz/failures
+proptest: If this test was run on a CI system, you may wish to add the following line to your copy of the file. (You may need to create it.)
+cc 8b5dede949389349e6efb74f7812838e6847e5ecccff479e0cb60fa9bbb572bc
+
+Ran 4 tests for test/Evidence.t.sol:EvidenceTest
+[PASS] testAppliedIsIdempotent() (gas: 266)
+[FAIL: assertion failed: // SPDX-License-Identifier: MIT
+pragma solidity =0.8.25;
+
+library LibGenerated {
+    bytes32 constant HEAD = bytes32(uint256(1));
+}
+ != // SPDX-License-Identifier: MIT
+pragma solidity =0.8.25;
+
+library LibGenerated {
+    bytes32 constant HEAD = bytes32(uint256(2));
+}
+] testGeneratedSourceMatchesSnapshot() (gas: 5529)
+Traces:
+  [5529] EvidenceTest::testGeneratedSourceMatchesSnapshot()
+    ├─ [0] VM::assertEq("// SPDX-License-Identifier: MIT\npragma solidity =0.8.25;\n\nlibrary LibGenerated {\n    bytes32 constant HEAD = bytes32(uint256(1));\n}\n", "// SPDX-License-Identifier: MIT\npragma solidity =0.8.25;\n\nlibrary LibGenerated {\n    bytes32 constant HEAD = bytes32(uint256(2));\n}\n") [staticcall]
+    │   └─ ← [Revert] assertion failed: // SPDX-License-Identifier: MIT
+pragma solidity =0.8.25;
+
+library LibGenerated {
+    bytes32 constant HEAD = bytes32(uint256(1));
+}
+ != // SPDX-License-Identifier: MIT
+pragma solidity =0.8.25;
+
+library LibGenerated {
+    bytes32 constant HEAD = bytes32(uint256(2));
+}
+
+    └─ ← [Revert] assertion failed: // SPDX-License-Identifier: MIT
+pragma solidity =0.8.25;
+
+library LibGenerated {
+    bytes32 constant HEAD = bytes32(uint256(1));
+}
+ != // SPDX-License-Identifier: MIT
+pragma solidity =0.8.25;
+
+library LibGenerated {
+    bytes32 constant HEAD = bytes32(uint256(2));
+}
+
+
+[PASS] testHeadGenesisIsNotZero() (gas: 212)
+[FAIL: assertion failed: 1 != 2] testSingleLineFailure() (gas: 3333)
+Traces:
+  [3333] EvidenceTest::testSingleLineFailure()
+    ├─ [0] VM::assertEq(1, 2) [staticcall]
+    │   └─ ← [Revert] assertion failed: 1 != 2
+    └─ ← [Revert] assertion failed: 1 != 2
+
+Suite result: FAILED. 2 passed; 2 failed; 0 skipped; finished in 1.77ms (1.39ms CPU time)
+
+Ran 5 tests for test/Shapes.t.sol:ShapesTest
+[FAIL: Custom(1, 2)] testCustomErrorRevertIsUncaught() (gas: 5877)
+Traces:
+  [5877] ShapesTest::testCustomErrorRevertIsUncaught()
+    ├─ [663] Reverter::boom() [staticcall]
+    │   └─ ← [Revert] Custom(1, 2)
+    └─ ← [Revert] Custom(1, 2)
+
+[FAIL: assertion failed: 958 >= 10; counterexample: calldata=0x8054777000000000000000000000000000000000000000000000000000000000000007a6 args=[1958]] testFuzz_BoundedIsAlwaysSmall(uint256) (runs: 1, μ: 747, ~: 747)
+Traces:
+  [3833] ShapesTest::testFuzz_BoundedIsAlwaysSmall(1958)
+    ├─ [0] VM::assertLt(958, 10) [staticcall]
+    │   └─ ← [Revert] assertion failed: 958 >= 10
+    └─ ← [Revert] assertion failed: 958 >= 10
+
+[FAIL: revert: plain string reason] testPlainRevert() (gas: 495)
+Traces:
+  [495] ShapesTest::testPlainRevert()
+    └─ ← [Revert] revert: plain string reason
+
+[PASS] testThisOnePasses() (gas: 255)
+[FAIL: assertion failed: 3 != 4] test_snake_case_name_fails() (gas: 3355)
+Traces:
+  [3355] ShapesTest::test_snake_case_name_fails()
+    ├─ [0] VM::assertEq(3, 4) [staticcall]
+    │   └─ ← [Revert] assertion failed: 3 != 4
+    └─ ← [Revert] assertion failed: 3 != 4
+
+Suite result: FAILED. 1 passed; 4 failed; 0 skipped; finished in 1.84ms (2.76ms CPU time)
+
+Ran 2 tests for test/Invariant.t.sol:InvariantTest
+[FAIL: assertion failed: 1 != 0]
+	[Sequence] (original: 1, shrunk: 1)
+		sender=0x0000000000000000000000000000000000000020 addr=[test/Invariant.t.sol:Counter]0x5615dEB798BB3E4dFa0139dFa1b3D433Cc23b72f calldata=inc() args=[]
+ invariant_NeverIncrements() (runs: 0, calls: 0, reverts: 0)
+Traces:
+  [22454] Counter::inc()
+    └─ ← [Stop]
+
+  [10932] InvariantTest::invariant_NeverIncrements()
+    ├─ [2402] Counter::n() [staticcall]
+    │   └─ ← [Return] 1
+    ├─ [0] VM::assertEq(1, 0) [staticcall]
+    │   └─ ← [Revert] assertion failed: 1 != 0
+    └─ ← [Revert] assertion failed: 1 != 0
+
+[PASS] testCounterStartsAtZero() (gas: 7803)
+Suite result: FAILED. 1 passed; 1 failed; 0 skipped; finished in 4.54ms (2.54ms CPU time)
+
+Ran 3 test suites in 13.14ms (8.15ms CPU time): 4 tests passed, 7 failed, 0 skipped (11 total tests)
+
+Failing tests:
+Encountered 2 failing tests in test/Evidence.t.sol:EvidenceTest
+[FAIL: assertion failed: // SPDX-License-Identifier: MIT
+pragma solidity =0.8.25;
+
+library LibGenerated {
+    bytes32 constant HEAD = bytes32(uint256(1));
+}
+ != // SPDX-License-Identifier: MIT
+pragma solidity =0.8.25;
+
+library LibGenerated {
+    bytes32 constant HEAD = bytes32(uint256(2));
+}
+] testGeneratedSourceMatchesSnapshot() (gas: 5529)
+[FAIL: assertion failed: 1 != 2] testSingleLineFailure() (gas: 3333)
+
+Encountered 1 failing test in test/Invariant.t.sol:InvariantTest
+[FAIL: assertion failed: 1 != 0]
+	[Sequence] (original: 1, shrunk: 1)
+		sender=0x0000000000000000000000000000000000000020 addr=[test/Invariant.t.sol:Counter]0x5615dEB798BB3E4dFa0139dFa1b3D433Cc23b72f calldata=inc() args=[]
+ invariant_NeverIncrements() (runs: 0, calls: 0, reverts: 0)
+
+Encountered 4 failing tests in test/Shapes.t.sol:ShapesTest
+[FAIL: Custom(1, 2)] testCustomErrorRevertIsUncaught() (gas: 5877)
+[FAIL: assertion failed: 958 >= 10; counterexample: calldata=0x8054777000000000000000000000000000000000000000000000000000000000000007a6 args=[1958]] testFuzz_BoundedIsAlwaysSmall(uint256) (runs: 1, μ: 747, ~: 747)
+[FAIL: revert: plain string reason] testPlainRevert() (gas: 495)
+[FAIL: assertion failed: 3 != 4] test_snake_case_name_fails() (gas: 3355)
+
+Encountered a total of 7 failing tests, 4 tests succeeded
