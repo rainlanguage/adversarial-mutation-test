@@ -129,7 +129,7 @@ JSON, no comments:
   "commitsAheadOfTag": 0,
   "scope": "whole repo",
   "tool": "adversarial-mutation-test",
-  "skillVersion": "0.32.0",
+  "skillVersion": "0.33.0",
   "summary": {
     "behaviours": 600,
     "candidates": 89,
