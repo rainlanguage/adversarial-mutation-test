@@ -62,7 +62,9 @@ the eventualities".
    first — stale artifacts are the #1 way mutation testing lies to you).
 4. A test fails → behavior covered. No test fails → a real gap → add or
    strengthen a discriminating test until it fails under the mutation.
-5. Restore the mutation; record the result.
+5. Restore the mutation — scoped to the paths you mutated, never a bare
+   `git checkout -- .`, which also reverts every other uncommitted edit in the
+   tree — and record the result.
 
 See [`skills/adversarial-mutation-test/SKILL.md`](skills/adversarial-mutation-test/SKILL.md)
 for the full method.
