@@ -119,30 +119,37 @@ probed mutant is killed; 1 on any non-kill; 2 when the pass cannot be trusted.
 `--only <substring>` re-runs a subset while strengthening a killer;
 `--json <path>` writes the machine-readable report.
 
-## Scan record template
+## Scan ledger
 
-Campaigns close by appending one entry per run to a committed
-`audit/mutation-test-scans.json` on the default branch (see SKILL.md). Valid
-JSON, no comments:
+Campaigns close by appending one record per run to a committed
+`audit/mutation-test-scans.json` on the default branch (see SKILL.md). The file
+is a wrapper object, not a bare array: `schemaVersion` says how to read it,
+`records` holds the runs. Valid JSON, no comments:
 
 ```json
 {
-  "timestamp": "2026-08-12T19:40:00Z",
-  "commit": "08d547fdeadbeefc0ffee1122334455667788990",
-  "testsAfterCommit": "1f9be22cafebabe0ddf00d998877665544332211",
-  "publishedTag": "v1.2.3",
-  "commitsAheadOfTag": 0,
-  "scope": "whole repo",
-  "tool": "adversarial-mutation-test",
-  "skillVersion": "0.34.0",
-  "summary": {
-    "behaviours": 600,
-    "candidates": 89,
-    "confirmed": 30,
-    "testsBefore": 41,
-    "testsAfter": 84,
-    "filed": ["#2651", "#2660"]
-  }
+  "schemaVersion": 1,
+  "records": [
+    {
+      "schemaVersion": 1,
+      "timestamp": "2026-08-12T19:40:00Z",
+      "commit": "08d547fdeadbeefc0ffee1122334455667788990",
+      "testsAfterCommit": "1f9be22cafebabe0ddf00d998877665544332211",
+      "publishedTag": "v1.2.3",
+      "commitsAheadOfTag": 0,
+      "scope": "whole repo",
+      "tool": "adversarial-mutation-test",
+      "skillVersion": "0.35.0",
+      "summary": {
+        "behaviours": 600,
+        "candidates": 89,
+        "confirmed": 30,
+        "testsBefore": 41,
+        "testsAfter": 84,
+        "filed": ["#2651", "#2660"]
+      }
+    }
+  ]
 }
 ```
 
@@ -150,6 +157,8 @@ JSON, no comments:
 `testsAfterCommit` the exact SHA the run's own output landed at; `publishedTag`
 the release at `commit` (null if unreleased) with `commitsAheadOfTag` its
 distance. All five are must-haves; `summary` is nice-to-have.
+
+### Two trees, and which numbers hold at each
 
 A record spans two trees, and every number in it is measured at one of them:
 `commit` is the tree the scan ran against, which every _before_ number
@@ -166,6 +175,52 @@ after-state count checkable at all — `rain.sol.codegen` committed
 `testsAfter: 102`, a count that occurs at no commit in the range the record
 covers, and nothing could catch it because the record named no tree to check it
 against.
+
+### Two versions, and neither is `skillVersion`
+
+The top-level `schemaVersion` versions the envelope — the wrapper shape and the
+read rules below. The per-record `schemaVersion` versions that one record's
+field set. They are separate fields because the file provably holds records of
+more than one shape (see Migration), so a single number could not honestly
+describe both the file and everything in it. Neither of these is skillVersion,
+which names the skill that wrote a record and is not a statement about its shape
+— it has already failed to be one, the `0.30.0` summary and the current template
+sharing only `filed`.
+
+### Ordering, and what "newest" means
+
+`records` is append-only. A record is a historical fact about a tree, so it is
+never rewritten, reordered, or removed.
+
+The newest record is the one **whose timestamp is greatest** — not the last
+array element. Append order is the weakest of the candidates precisely because
+it is what a PR queue scrambles: two campaigns can land in the opposite order to
+the order they ran. Ties in `timestamp` break by array position, later wins.
+Nothing else is the rule — not `commit`'s position in history, not file order.
+
+**Newest is not current.** Every value in a record is frozen at run end and
+describes the tree it names, so `commitsAheadOfTag` keeps reading `0` however
+far the repo moves on afterwards — a stale record does not decay into looking
+stale. The ledger answers "what was audited, and when", never "is that still
+true": a reader asking whether a repo is audited at its current release must
+compare the newest record's `commit` against the repo today. `rain.sol.codegen`
+is the live case — its one record says `commitsAheadOfTag: 0` while sitting 35
+commits and 5 published tags behind the default branch.
+
+### Migration from a bare array
+
+The ledger was a bare array before `schemaVersion` 1, and committed ones still
+are. A campaign that opens a bare array **wraps it in place on that run's
+append**: the array becomes `records`, the top-level `schemaVersion` is added,
+and every record already in it is preserved exactly — no field back-filled, no
+value corrected, nothing reordered. Back-filling `schemaVersion` or
+`testsAfterCommit` into an existing record would assert a measurement no run
+made.
+
+So a record carrying no `schemaVersion` predates the wrapper: its must-haves may
+be absent and its `summary` is not the current shape. Read it as a record of its
+own `skillVersion`, and never assume the newest record's shape holds across the
+file.
 
 ## License
 
