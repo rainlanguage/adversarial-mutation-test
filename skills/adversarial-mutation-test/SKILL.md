@@ -203,12 +203,13 @@ release was last audited"; the JSON template lives in this repo's README.
 
 The file is `{"schemaVersion": 1, "records": [...]}`, not a bare array, and
 `records` is append-only: never rewrite, reorder, or drop a record. Newest is
-the **greatest `timestamp`**, not the last element — a PR queue lands runs out
-of the order they ran — and ties break by array position, later wins. Newest is
-not current: every value is frozen at run end, so `commitsAheadOfTag` stays `0`
-however far the repo moves, and "is this still true" is answered against the
-repo, never from the file. Opening a bare array, wrap it on this append — the
-array becomes `records`, existing records untouched, nothing back-filled.
+the record **whose timestamp is greatest**, not the last element — a PR queue
+lands runs out of the order they ran — and ties break by array position, later
+wins. Newest is not current: every value is frozen at run end, so
+`commitsAheadOfTag` stays `0` however far the repo moves, and "is this still
+true" is answered against the repo, never from the file. Opening a bare array,
+wrap it on this append — the array becomes `records`, existing records
+untouched, nothing back-filled.
 
 Two trees, both full 40-char SHAs: the scanned `commit` is what every _before_
 number holds at; `testsAfterCommit` — the tree with this run's coverage PRs

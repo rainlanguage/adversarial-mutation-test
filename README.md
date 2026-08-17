@@ -182,17 +182,17 @@ The top-level `schemaVersion` versions the envelope — the wrapper shape and th
 read rules below. The per-record `schemaVersion` versions that one record's
 field set. They are separate fields because the file provably holds records of
 more than one shape (see Migration), so a single number could not honestly
-describe both the file and everything in it. Neither is `skillVersion`, which
-names the skill that wrote a record and is not a statement about the record's
-shape — it has already failed to be one, the `0.30.0` summary and the current
-template sharing only `filed`.
+describe both the file and everything in it. Neither of these is skillVersion,
+which names the skill that wrote a record and is not a statement about its shape
+— it has already failed to be one, the `0.30.0` summary and the current template
+sharing only `filed`.
 
 ### Ordering, and what "newest" means
 
 `records` is append-only. A record is a historical fact about a tree, so it is
 never rewritten, reordered, or removed.
 
-The newest record is the one with the **greatest `timestamp`** — not the last
+The newest record is the one **whose timestamp is greatest** — not the last
 array element. Append order is the weakest of the candidates precisely because
 it is what a PR queue scrambles: two campaigns can land in the opposite order to
 the order they ran. Ties in `timestamp` break by array position, later wins.
