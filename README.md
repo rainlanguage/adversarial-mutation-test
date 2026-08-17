@@ -128,24 +128,44 @@ JSON, no comments:
 ```json
 {
   "timestamp": "2026-08-12T19:40:00Z",
-  "commit": "08d547fdeadbeef",
+  "commit": "08d547fdeadbeefc0ffee1122334455667788990",
+  "testsAfterCommit": "1f9be22cafebabe0ddf00d998877665544332211",
   "publishedTag": "v1.2.3",
   "commitsAheadOfTag": 0,
   "scope": "whole repo",
   "tool": "adversarial-mutation-test",
-  "skillVersion": "0.33.0",
+  "skillVersion": "0.34.0",
   "summary": {
     "behaviours": 600,
     "candidates": 89,
     "confirmed": 30,
+    "testsBefore": 41,
+    "testsAfter": 84,
     "filed": ["#2651", "#2660"]
   }
 }
 ```
 
-`timestamp` is UTC at run end; `commit` the exact SHA scanned; `publishedTag`
-the release at that commit (null if unreleased) with `commitsAheadOfTag` its
-distance. Those three are the must-haves; `summary` is nice-to-have.
+`timestamp` is UTC at run end; `commit` the exact SHA scanned;
+`testsAfterCommit` the exact SHA the run's own output landed at; `publishedTag`
+the release at `commit` (null if unreleased) with `commitsAheadOfTag` its
+distance. All five are must-haves; `summary` is nice-to-have.
+
+A record spans two trees, and every number in it is measured at one of them:
+`commit` is the tree the scan ran against, which every _before_ number
+(`testsBefore`, baseline counts) holds at; `testsAfterCommit` is the tree with
+the run's coverage PRs merged, which every _after_ number (`testsAfter`, and
+anything else measured post-landing) holds at. Both are full 40-character SHAs —
+a short prefix is a weaker anchor and grows ambiguous as history grows.
+
+`testsAfterCommit` is never null and never omitted: a run that landed nothing
+sets it **equal to `commit`**. "Nothing landed" and "nobody recorded where it
+landed" have to stay distinguishable, so an absent field means the record is
+malformed rather than that the run was clean. This is the field that makes an
+after-state count checkable at all — `rain.sol.codegen` committed
+`testsAfter: 102`, a count that occurs at no commit in the range the record
+covers, and nothing could catch it because the record named no tree to check it
+against.
 
 ## License
 

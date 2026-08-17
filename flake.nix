@@ -54,6 +54,9 @@
             pkgs.rustc
             pkgs.clippy
             pkgs.rustfmt
+            # `.github/scripts/` runs on it, so a hygiene check is runnable
+            # locally the same way CI runs it rather than checked by eye.
+            pkgs.jq
           ];
         };
       }
