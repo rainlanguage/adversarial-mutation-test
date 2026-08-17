@@ -158,6 +158,24 @@ is a wrapper object, not a bare array: `schemaVersion` says how to read it,
 the release at `commit` (null if unreleased) with `commitsAheadOfTag` its
 distance. All five are must-haves; `summary` is nice-to-have.
 
+### Two trees, and which numbers hold at each
+
+A record spans two trees, and every number in it is measured at one of them:
+`commit` is the tree the scan ran against, which every _before_ number
+(`testsBefore`, baseline counts) holds at; `testsAfterCommit` is the tree with
+the run's coverage PRs merged, which every _after_ number (`testsAfter`, and
+anything else measured post-landing) holds at. Both are full 40-character SHAs —
+a short prefix is a weaker anchor and grows ambiguous as history grows.
+
+`testsAfterCommit` is never null and never omitted: a run that landed nothing
+sets it **equal to `commit`**. "Nothing landed" and "nobody recorded where it
+landed" have to stay distinguishable, so an absent field means the record is
+malformed rather than that the run was clean. This is the field that makes an
+after-state count checkable at all — `rain.sol.codegen` committed
+`testsAfter: 102`, a count that occurs at no commit in the range the record
+covers, and nothing could catch it because the record named no tree to check it
+against.
+
 ### Two versions, and neither is `skillVersion`
 
 The top-level `schemaVersion` versions the envelope — the wrapper shape and the
@@ -203,22 +221,6 @@ So a record carrying no `schemaVersion` predates the wrapper: its must-haves may
 be absent and its `summary` is not the current shape. Read it as a record of its
 own `skillVersion`, and never assume the newest record's shape holds across the
 file.
-
-A record spans two trees, and every number in it is measured at one of them:
-`commit` is the tree the scan ran against, which every _before_ number
-(`testsBefore`, baseline counts) holds at; `testsAfterCommit` is the tree with
-the run's coverage PRs merged, which every _after_ number (`testsAfter`, and
-anything else measured post-landing) holds at. Both are full 40-character SHAs —
-a short prefix is a weaker anchor and grows ambiguous as history grows.
-
-`testsAfterCommit` is never null and never omitted: a run that landed nothing
-sets it **equal to `commit`**. "Nothing landed" and "nobody recorded where it
-landed" have to stay distinguishable, so an absent field means the record is
-malformed rather than that the run was clean. This is the field that makes an
-after-state count checkable at all — `rain.sol.codegen` committed
-`testsAfter: 102`, a count that occurs at no commit in the range the record
-covers, and nothing could catch it because the record named no tree to check it
-against.
 
 ## License
 

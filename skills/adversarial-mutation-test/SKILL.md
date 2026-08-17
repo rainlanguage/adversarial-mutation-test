@@ -196,10 +196,10 @@ One mutation, one behavior — the failing-test set stays diagnostic.
 
 Close every run — including a clean one — by appending a record to a committed
 `audit/mutation-test-scans.json` and landing it on the default branch:
-`schemaVersion`, timestamp, scanned commit, `testsAfterCommit`, published tag
-(+ commits ahead), scope, tool + skill version, summary with filed issue
-numbers. The org health check reads the newest record — as defined below — for
-"which release was last audited"; the JSON template lives in this repo's README.
+`schemaVersion`, timestamp, scanned commit, `testsAfterCommit`, published tag (+
+commits ahead), scope, tool + skill version, summary with filed issue numbers.
+The org health check reads the newest record — as defined below — for "which
+release was last audited"; the JSON template lives in this repo's README.
 
 The file is `{"schemaVersion": 1, "records": [...]}`, not a bare array, and
 `records` is append-only: never rewrite, reorder, or drop a record. Newest is
