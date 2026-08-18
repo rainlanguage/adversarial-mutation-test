@@ -119,6 +119,41 @@ probed mutant is killed; 1 on any non-kill; 2 when the pass cannot be trusted.
 `--only <substring>` re-runs a subset while strengthening a killer;
 `--json <path>` writes the machine-readable report.
 
+### Two-phase probing (`[suite.narrow]`)
+
+Full-suite-per-mutant is the dominant cost of a campaign, and it grows with the
+suite the campaign itself is writing — the run gets slower exactly as it
+succeeds. An optional `[suite.narrow]` block probes each mutant against the
+tests derived from its own file first, and runs `command` only when that narrow
+run did not prove a kill:
+
+```toml
+[suite.narrow]
+from = '^src/(.*)\.sol$'                             # regex over a mutant's `file`
+to = 'test/$1.t.sol'                                 # its captures -> a path that must exist
+command = ["forge", "test", "--match-path", "{}"]    # {} = the derived selection
+```
+
+The verdicts are unchanged, because the asymmetry is real: a kill is **proof** —
+the selection is a subset of the full suite, so the test that failed in it fails
+in the full run too — while a survival claims no test _anywhere_ caught the
+mutant, and absence is only knowable over the whole population. So an apparent
+survival (or an unscorable `NO-RUN`) is re-taken against the whole suite before
+anything is recorded. Kills are the common case, so the expensive path is rare.
+Each verdict reports its `phase` (`narrow` / `full`) and the `selection` probed,
+so the report states which runs were skipped instead of implying it.
+
+The selection is **derived, never hand-listed**. Where a repo's tests do not
+mirror its sources the derivation fails and that mutant falls back to the whole
+suite, out loud — `from` not matching, the derived path not existing, or the
+selection not being green-and-non-empty at its own baseline. A selection that
+runs nothing can kill nothing, so it is proven to run tests before any mutant is
+probed against it, rather than being discovered as a narrow phase that never
+settled anything; the per-selection counts land in `baseline.narrow` of the JSON
+report, which is the probe's "assert the baseline count" rule made sharp — a
+per-file count is small and stable, so a selection matching nothing shows up
+instead of hiding inside a three-figure total.
+
 ## Scan record template
 
 Campaigns close by appending one entry per run to a committed
@@ -133,7 +168,7 @@ JSON, no comments:
   "commitsAheadOfTag": 0,
   "scope": "whole repo",
   "tool": "adversarial-mutation-test",
-  "skillVersion": "0.33.0",
+  "skillVersion": "0.34.0",
   "summary": {
     "behaviours": 600,
     "candidates": 89,
