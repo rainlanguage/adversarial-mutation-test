@@ -1,6 +1,6 @@
 ---
 name: adversarial-mutation-test
-version: 0.33.0
+version: 0.34.0
 description: Use to systematically find BUGS in and harden the test suite for a WHOLE repository (or a whole module of it). Two co-equal goals the name carries: ADVERSARIAL (treat spec/intent as the oracle and the code as suspect — derive expected behavior independently and hunt for inputs where the code is wrong) and MUTATION (prove tests cover the code). Mutation-drives a behavior-centric coverage ledger — for each behavior, break the line and check the whole suite: existing tests that kill the mutant are validated and logged (so existing coverage is audited and in scope), and only surviving mutants (real gaps) get a new discriminating test. An existing test that already kills mutants is left as-is; one meant to cover a behavior but that a mutant survives is strengthened in place (not duplicated); one broken on the unmutated baseline is fixed or its underlying code bug surfaced; a test is never edited to swallow a mutation. Designed for long campaigns that outlive the context window: progress lives in a durable gitignored scratch file so it survives compaction. A single change/PR/function is just a narrowed scope. Triggers on "test the whole repo", "harden the test suite", "mutation test the codebase", "audit the tests", "adversarial tests", "prove these tests cover the code", "exhaust the eventualities".
 ---
 
@@ -67,10 +67,17 @@ adversarial pass judges covered behaviors too.
 1. **Enumerate behaviors**: every conditional, comparison, computation,
    side-effect, filter, early-return, and error/skip path — happy path, each
    branch, boundaries, interactions, "must NOT happen" cases.
-2. **Baseline green.** A test failing on unmutated code is legitimately broken:
-   fix a wrong/outdated/flaky test, or surface the real code bug its failure
-   reveals. Never mask a baseline failure by matching the assertion to buggy
-   behavior.
+2. **Baseline green, then probe the pre-existing suite in full.** A test failing
+   on unmutated code is legitimately broken: fix a wrong/outdated/flaky test, or
+   surface the real code bug its failure reveals. Never mask a baseline failure
+   by matching the assertion to buggy behavior. Then, with **none of your own
+   tests written**, probe the whole enumerated list against that suite and
+   finish the pass before writing anything: every kill credits a **named
+   pre-existing** test, and the survivors are step 4's worklist. Writing early
+   forfeits that attribution and cannot be recovered in place — recovery costs a
+   second clone at the base commit, a second full pass, and a diff of the two
+   matrices, which `rain.sol.codegen` paid across 95 mutants to recover 14
+   killed / 81 survived.
 3. **Probe with the bundled tool.** Author one targeted mutation per behavior
    (catalog below) in a mutants file, then:
 
@@ -85,14 +92,15 @@ adversarial pass judges covered behaviors too.
    uphold: **commit before the first probe** (the auditable recovery point), and
    **keep targets out of test code** — a target in the oracle co-mutates the
    expectation and voids the probe.
-4. **Act on verdicts.** KILLED = covered: credit the killing test in the ledger.
-   SURVIVED = a real gap: if an existing test purports to cover the behavior,
-   strengthen it in place until it kills the mutant; otherwise add a new test.
-   Either way the test must be **discriminating** — a different observable value
-   under correct vs wrong code (exact values over bare reverts) — passing on
-   baseline and failing under the mutation; re-probe (`--only`) until killed.
-   Never delete a test, never weaken one, and never edit one to pass under a
-   mutation — that encodes the injected bug.
+4. **Act on verdicts — step 2's survivor set is the worklist.** KILLED =
+   covered: credit the killing test in the ledger. SURVIVED = a real gap: if an
+   existing test purports to cover the behavior, strengthen it in place until it
+   kills the mutant; otherwise add a new test. Either way the test must be
+   **discriminating** — a different observable value under correct vs wrong code
+   (exact values over bare reverts) — passing on baseline and failing under the
+   mutation; re-probe (`--only`) until killed. Never delete a test, never weaken
+   one, and never edit one to pass under a mutation — that encodes the injected
+   bug.
 5. **Loop until dry.** Record the matrix, then re-survey the unit for unprobed
    behaviors and keep probing until a full pass adds no new gap. Size and
    per-probe cost change pacing, never scope; an unfinished unit records its
@@ -207,6 +215,8 @@ repo's README.
 - Discriminating assertions: "got 3, expected 1" beats "it reverted".
 - Confirm the mutation is live — regeneration inside the suite command; stale
   artifacts are the #1 way a matrix lies.
+- Probe the pre-existing suite before writing a test — attribution exists only
+  while the suite is untouched.
 - Coverage ≠ correctness: green, mutant-killing tests can enshrine a bug;
   re-derive expected values from spec.
 - Exhaust, don't sample — loop until a full pass adds nothing; pace, never
