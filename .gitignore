@@ -5,3 +5,5 @@ target/
 # machine generated it, so a committed copy is unusable on any other checkout.
 # Every rainix consumer ignores it; CI regenerates it inside the shell.
 .pre-commit-config.yaml
+# mutation-probe's own lock lands here when this repo is the tree being probed.
+.mutation-test/

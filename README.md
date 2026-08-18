@@ -114,7 +114,10 @@ Verdicts: `KILLED` (failing tally, or non-zero exit with proof of a run) /
 compile error, timeout — never scored as survived) / `HARNESS-ERROR` (target not
 matched exactly once). A red, silent, or zero-test baseline aborts before any
 probe; writes are atomic and every restore is verified byte-exact; a hung
-suite's whole process group is killed at `timeout-secs`. Exit 0 only when every
+suite's whole process group is killed at `timeout-secs`. One probe owns one tree
+at a time — the pass holds `<root>/.mutation-test/probe.lock` and refuses a tree
+another live probe already owns, so a probe that outlived the agent that
+launched it blocks a successor instead of racing it. Exit 0 only when every
 probed mutant is killed; 1 on any non-kill; 2 when the pass cannot be trusted.
 `--only <substring>` re-runs a subset while strengthening a killer;
 `--json <path>` writes the machine-readable report.
@@ -133,7 +136,7 @@ JSON, no comments:
   "commitsAheadOfTag": 0,
   "scope": "whole repo",
   "tool": "adversarial-mutation-test",
-  "skillVersion": "0.33.0",
+  "skillVersion": "0.34.0",
   "summary": {
     "behaviours": 600,
     "candidates": 89,
