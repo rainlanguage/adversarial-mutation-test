@@ -1,2 +1,7 @@
 target/
 /result
+# Generated into the nix store and symlinked in by git-hooks.nix when you enter
+# the rainix dev shell — it hard-codes absolute /nix/store paths from whichever
+# machine generated it, so a committed copy is unusable on any other checkout.
+# Every rainix consumer ignores it; CI regenerates it inside the shell.
+.pre-commit-config.yaml
