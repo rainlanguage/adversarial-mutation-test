@@ -117,8 +117,8 @@ probe; writes are atomic and every restore is verified byte-exact; a hung
 suite's whole process group is killed at `timeout-secs`. Exit 0 only when every
 probed mutant is killed; 1 on any non-kill; 2 when the pass cannot be trusted.
 `--only <substring>` re-runs a subset while strengthening a killer — repeatable,
-the selections union, and each value must match something;
-`--json <path>` writes the machine-readable report.
+the selections union, and each value must match something; `--json <path>`
+writes the machine-readable report.
 
 ## Scan record template
 
