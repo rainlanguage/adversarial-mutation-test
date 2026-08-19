@@ -322,3 +322,87 @@ replacement = "CAP 99"
     );
     let _ = std::fs::remove_dir_all(&dir);
 }
+
+#[test]
+fn repeated_only_probes_the_union_of_all_values() {
+    // Three --only flags, each matching exactly one mutant: all three are probed,
+    // in config order. Pins the defect where a repeated flag silently kept a single
+    // value (last-one-wins) and probed 1 of 3.
+    let dir = unique_dir("union");
+    let code = "GUARD on\nCAP 10\nMODE strict\n";
+    toy(&dir, code);
+    let config = write_config(&dir, ALL_FOUR);
+    let (exit, out, report) = run(
+        &config,
+        &[
+            "--only",
+            "M-kill",
+            "--only",
+            "M-survive",
+            "--only",
+            "M-norun",
+        ],
+    );
+    let names: Vec<&str> = report["mutants"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .map(|m| m["name"].as_str().unwrap())
+        .collect();
+    assert_eq!(
+        names,
+        vec![
+            "M-kill guard off",
+            "M-survive cap unchecked",
+            "M-norun crash the suite"
+        ],
+        "every --only value's matches are probed, in config order; output:\n{out}"
+    );
+    assert_eq!(
+        exit, 1,
+        "the union includes a survivor, so the pass fails; output:\n{out}"
+    );
+    let _ = std::fs::remove_dir_all(&dir);
+}
+
+#[test]
+fn repeated_only_value_matching_nothing_aborts_even_when_another_matches() {
+    // The no-match error is per VALUE. The dead value comes first: last-one-wins
+    // would have dropped it and exited 0 on the surviving value alone, laundering
+    // the typo out of the pass.
+    let dir = unique_dir("union-nomatch");
+    toy(&dir, "GUARD on\nCAP 10\nMODE strict\n");
+    let config = write_config(&dir, ALL_FOUR);
+    let (exit, out, report) = run(&config, &["--only", "ABSENT-VALUE", "--only", "M-kill"]);
+    assert_eq!(
+        exit, 2,
+        "a value matching nothing aborts the pass; output:\n{out}"
+    );
+    assert!(
+        out.contains("ABSENT-VALUE"),
+        "the abort names the value that matched nothing:\n{out}"
+    );
+    assert_eq!(
+        report,
+        serde_json::Value::Null,
+        "no report when selection aborts"
+    );
+    let _ = std::fs::remove_dir_all(&dir);
+}
+
+#[test]
+fn single_only_matching_nothing_aborts_naming_the_value() {
+    let dir = unique_dir("one-nomatch");
+    toy(&dir, "GUARD on\nCAP 10\nMODE strict\n");
+    let config = write_config(&dir, ALL_FOUR);
+    let (exit, out, _) = run(&config, &["--only", "ZZZ-NOTHING"]);
+    assert_eq!(
+        exit, 2,
+        "no match is an error, never a silent no-op; output:\n{out}"
+    );
+    assert!(
+        out.contains("ZZZ-NOTHING"),
+        "the abort names the value that matched nothing:\n{out}"
+    );
+    let _ = std::fs::remove_dir_all(&dir);
+}
