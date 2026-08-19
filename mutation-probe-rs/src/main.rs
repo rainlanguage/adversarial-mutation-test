@@ -385,6 +385,45 @@ struct Summary {
     harness_error: usize,
 }
 
+/// PURE: warning lines for KILLED mutants whose configured fail-pattern captured no
+/// killer — an unattributed kill usually means the killing failure has a shape the
+/// pattern cannot match, and it must be loud, not a silently empty `killedBy`.
+///
+/// The known trap is forge: it puts brackets inside `[FAIL: ...]` reasons (custom
+/// errors pretty-print integers as `65534 [6.553e4]`, fuzz counterexamples embed
+/// `args=[...]`), so a `[^\]]*`-style pattern stops at the first nested `]` and the
+/// capture never reaches the test name — dropping attribution on exactly the most
+/// informative failures. When the same pattern did capture killers on other mutants,
+/// the warning says so: that contrast is the strongest signal the pattern is wrong.
+fn attribution_gap_warnings(
+    reports: &[MutantReport],
+    fail_pattern_configured: bool,
+) -> Vec<String> {
+    if !fail_pattern_configured {
+        return Vec::new();
+    }
+    let captured_elsewhere = reports
+        .iter()
+        .any(|r| matches!(&r.verdict, Verdict::Killed { killed_by } if !killed_by.is_empty()));
+    reports
+        .iter()
+        .filter(|r| matches!(&r.verdict, Verdict::Killed { killed_by } if killed_by.is_empty()))
+        .map(|r| {
+            let elsewhere = if captured_elsewhere {
+                " even though it captured killers on other mutants"
+            } else {
+                ""
+            };
+            format!(
+                "warning: {}: killed, no killer captured — fail-pattern may not match \
+                 this failure's shape{elsewhere} (forge nests ']' inside [FAIL: ...] \
+                 reasons; --help shows a nesting-tolerant pattern)",
+                r.name
+            )
+        })
+        .collect()
+}
+
 // ------------------------------------------------------------------- main ----
 
 fn fail(msg: &str) -> ! {
@@ -420,7 +459,15 @@ MUTANTS FILE (TOML)
                                   # suite's own tally. Multiple matches SUM (cargo
                                   # prints one line per test binary). No match =
                                   # the suite did not provably run.
-    fail-pattern = 'test (\S+) \.\.\. FAILED'   # optional: 1 group naming a killer
+    fail-pattern = 'test (\S+) \.\.\. FAILED'
+                                  # optional: 1 group naming a killer. For forge
+                                  # use '\[FAIL.*\] (\S+)' — greedy, anchored on
+                                  # a line's LAST ']'. The natural-looking
+                                  # '\[FAIL[^\]]*\]' stops at the first nested
+                                  # ']' — forge puts brackets inside [FAIL: ...]
+                                  # reasons (custom errors: "65534 [6.553e4]";
+                                  # fuzz counterexamples: "args=[...]") — and
+                                  # captures no killer on those failures.
     timeout-secs = 1800           # optional; the suite's process group is killed
 
     [[mutants]]
@@ -443,6 +490,8 @@ INTEGRITY (enforced)
     atomic (temp + rename): no failure mode leaves a file truncated. Every
     restore is verified byte-exact, and each file is re-checked pristine before
     the next mutant. Suite output is capped per stream (oldest bytes dropped).
+    A KILLED mutant whose configured fail-pattern captured no killer draws a
+    warning — the attribution gap is loud, never silent.
 
 EXIT CODES
     0  baseline green and every probed mutant KILLED
@@ -629,6 +678,9 @@ fn main() {
         summary.no_run,
         summary.harness_error
     );
+    for w in attribution_gap_warnings(&reports, fail_pattern.is_some()) {
+        eprintln!("{w}");
+    }
 
     let verdicts: Vec<Verdict> = reports.iter().map(|r| r.verdict.clone()).collect();
     let report = Report {
@@ -726,6 +778,135 @@ mod tests {
         );
         match mutant_verdict(out, Some(&fp)) {
             Verdict::Killed { killed_by } => assert_eq!(killed_by, vec!["guard_test"]),
+            other => panic!("expected Killed, got {other:?}"),
+        }
+    }
+
+    fn report(name: &str, verdict: Verdict) -> MutantReport {
+        MutantReport {
+            name: name.to_string(),
+            file: "code.txt".to_string(),
+            verdict,
+        }
+    }
+
+    #[test]
+    fn nested_bracket_fail_line_defeats_the_natural_forge_pattern_and_warns() {
+        // Forge custom-error reverts pretty-print integers with brackets inside the
+        // [FAIL: ...] reason, so this pattern's [^\]]* stops at the first nested ']'
+        // and never reaches the test name: the kill scores with no killer captured,
+        // and that gap must be printed, not silent.
+        let natural = regex::Regex::new(r"\[FAIL[^\]]*\] (\S+)").unwrap();
+        let out = classify_suite(
+            "[FAIL: DataTooLarge(65534 [6.553e4])] testTooLarge() (gas: 500)\n0 passed | 1 failed",
+            false,
+            &proof(),
+        );
+        let verdict = mutant_verdict(out, Some(&natural));
+        match &verdict {
+            Verdict::Killed { killed_by } => assert!(
+                killed_by.is_empty(),
+                "premise: the nested ']' defeats the capture"
+            ),
+            other => panic!("expected Killed, got {other:?}"),
+        }
+        let warnings = attribution_gap_warnings(&[report("A02", verdict)], true);
+        assert_eq!(warnings.len(), 1, "the attribution gap must be loud");
+        assert!(
+            warnings[0].contains("A02"),
+            "names the mutant: {}",
+            warnings[0]
+        );
+        assert!(
+            warnings[0].contains("no killer captured"),
+            "{}",
+            warnings[0]
+        );
+        assert!(
+            warnings[0].contains("fail-pattern may not match this failure's shape"),
+            "{}",
+            warnings[0]
+        );
+    }
+
+    #[test]
+    fn gap_warning_says_when_the_pattern_captured_on_other_mutants() {
+        let with = report(
+            "A01",
+            Verdict::Killed {
+                killed_by: vec!["testOk".to_string()],
+            },
+        );
+        let without = report("A02", Verdict::Killed { killed_by: vec![] });
+        let warnings = attribution_gap_warnings(&[with, without], true);
+        assert_eq!(warnings.len(), 1);
+        assert!(warnings[0].contains("A02"), "{}", warnings[0]);
+        assert!(
+            warnings[0].contains("captured killers on other mutants"),
+            "cross-mutant capture is the strongest signal the pattern is wrong: {}",
+            warnings[0]
+        );
+        // With no capture anywhere, the warning must not claim the pattern worked
+        // elsewhere.
+        let solo = attribution_gap_warnings(
+            &[report("A02", Verdict::Killed { killed_by: vec![] })],
+            true,
+        );
+        assert_eq!(solo.len(), 1);
+        assert!(!solo[0].contains("other mutants"), "{}", solo[0]);
+    }
+
+    #[test]
+    fn no_gap_warning_without_a_configured_fail_pattern_or_without_a_gap() {
+        // No fail-pattern configured: an empty killer list is the normal state.
+        let empty_kill = report("A02", Verdict::Killed { killed_by: vec![] });
+        assert!(attribution_gap_warnings(&[empty_kill], false).is_empty());
+        // Killer captured: attributed, nothing to warn about.
+        let attributed = report(
+            "A01",
+            Verdict::Killed {
+                killed_by: vec!["t".to_string()],
+            },
+        );
+        assert!(attribution_gap_warnings(&[attributed], true).is_empty());
+        // Non-KILLED verdicts have no kill to attribute.
+        let others = [
+            report("S", Verdict::Survived),
+            report(
+                "N",
+                Verdict::NoRun {
+                    detail: String::new(),
+                },
+            ),
+            report(
+                "H",
+                Verdict::HarnessError {
+                    detail: String::new(),
+                },
+            ),
+        ];
+        assert!(attribution_gap_warnings(&others, true).is_empty());
+    }
+
+    #[test]
+    fn recommended_forge_pattern_captures_through_nested_brackets() {
+        // The nesting-tolerant pattern --help and the README recommend for forge,
+        // proven against the two real FAIL shapes that defeat the natural one:
+        // greedy .* anchors on the line's LAST ']'.
+        let recommended = regex::Regex::new(r"\[FAIL.*\] (\S+)").unwrap();
+        let out = classify_suite(
+            "[FAIL: DataTooLarge(65534 [6.553e4])] testTooLarge() (gas: 500)\n\
+             [FAIL: assertion failed; counterexample: calldata=0xdeadbeef args=[3, 65532 [6.553e4]]] testFuzz(uint256) (runs: 7)\n\
+             0 passed | 2 failed",
+            false,
+            &proof(),
+        );
+        match mutant_verdict(out, Some(&recommended)) {
+            Verdict::Killed { killed_by } => assert_eq!(
+                killed_by,
+                vec!["testTooLarge()", "testFuzz(uint256)"],
+                "both killers are attributed"
+            ),
             other => panic!("expected Killed, got {other:?}"),
         }
     }
