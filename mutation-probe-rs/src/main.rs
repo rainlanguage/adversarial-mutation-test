@@ -63,7 +63,7 @@ fn default_timeout() -> u64 {
     1800
 }
 
-#[derive(Deserialize)]
+#[derive(Debug, Deserialize)]
 #[serde(deny_unknown_fields)]
 struct MutantConfig {
     name: String,
@@ -72,6 +72,31 @@ struct MutantConfig {
     /// Must occur EXACTLY once in the file, or the mutant is a HARNESS-ERROR.
     target: String,
     replacement: String,
+}
+
+/// PURE: which mutants the --only values select, or why selection aborts.
+///
+/// The values UNION: each selects every mutant whose name contains it, and the
+/// selection keeps config order without duplicates. A value matching nothing is an
+/// error naming that value — checked per value, never a silent no-op. No values
+/// selects every mutant.
+fn select_mutants<'a>(
+    mutants: &'a [MutantConfig],
+    only: &[String],
+) -> Result<Vec<&'a MutantConfig>, String> {
+    for o in only {
+        if !mutants.iter().any(|m| m.name.contains(o.as_str())) {
+            return Err(format!("--only {o:?} matched no mutant"));
+        }
+    }
+    let selected: Vec<&'a MutantConfig> = mutants
+        .iter()
+        .filter(|m| only.is_empty() || only.iter().any(|o| m.name.contains(o.as_str())))
+        .collect();
+    if selected.is_empty() {
+        return Err("no [[mutants]] in the config".to_string());
+    }
+    Ok(selected)
 }
 
 // --------------------------------------------------------------- verdicts ----
@@ -397,15 +422,17 @@ fn fail(msg: &str) -> ! {
 const HELP: &str = r#"mutation-probe — apply exact-string mutants, prove the suite ran, score honestly.
 
 USAGE
-    mutation-probe <mutants.toml> [--json <path>] [--only <substring>]
+    mutation-probe <mutants.toml> [--json <path>] [--only <substring>]...
 
     --json <path>       also write the machine-readable report
     --only <substring>  probe EVERY mutant whose name contains the substring, so a
                         short value ("M07") also selects longer names ("M070").
-                        Deliberately not exact matching: names carry prose, and
-                        over-selection is fail-safe — the extra mutants are probed
-                        and scored, exit 0 still demands all of them KILLED, and a
-                        value matching nothing is an error, never a silent no-op.
+                        Repeatable: the selections UNION. Deliberately not exact
+                        matching: names carry prose, and over-selection is
+                        fail-safe — the extra mutants are probed and scored, exit
+                        0 still demands all of them KILLED, and a value matching
+                        nothing is an error (checked per value), never a silent
+                        no-op.
     --help, -h          this manual
 
 MUTANTS FILE (TOML)
@@ -455,7 +482,7 @@ fn main() {
     let mut args = std::env::args().skip(1);
     let mut config_path: Option<String> = None;
     let mut json_path: Option<String> = None;
-    let mut only: Option<String> = None;
+    let mut only: Vec<String> = Vec::new();
     while let Some(a) = args.next() {
         match a.as_str() {
             "--help" | "-h" => {
@@ -465,12 +492,10 @@ fn main() {
             "--json" => {
                 json_path = Some(args.next().unwrap_or_else(|| fail("--json needs a path")))
             }
-            "--only" => {
-                only = Some(
-                    args.next()
-                        .unwrap_or_else(|| fail("--only needs a substring")),
-                )
-            }
+            "--only" => only.push(
+                args.next()
+                    .unwrap_or_else(|| fail("--only needs a substring")),
+            ),
             // A misspelled flag must not silently become the config path.
             other if other.starts_with('-') => fail(&format!("unknown flag {other:?} (--help)")),
             _ if config_path.is_none() => config_path = Some(a),
@@ -478,7 +503,7 @@ fn main() {
         }
     }
     let config_path = config_path.unwrap_or_else(|| {
-        fail("usage: mutation-probe <mutants.toml> [--json <path>] [--only <substring>] (--help for the manual)")
+        fail("usage: mutation-probe <mutants.toml> [--json <path>] [--only <substring>]... (--help for the manual)")
     });
 
     let raw = std::fs::read_to_string(&config_path)
@@ -511,17 +536,8 @@ fn main() {
         fail(&format!("suite.root {} is not a directory", root.display()));
     }
 
-    let selected: Vec<&MutantConfig> = cfg
-        .mutants
-        .iter()
-        .filter(|m| only.as_deref().is_none_or(|o| m.name.contains(o)))
-        .collect();
-    if selected.is_empty() {
-        fail(match only {
-            Some(_) => "--only matched no mutant",
-            None => "no [[mutants]] in the config",
-        });
-    }
+    let selected: Vec<&MutantConfig> =
+        select_mutants(&cfg.mutants, &only).unwrap_or_else(|e| fail(&e));
 
     // Original bytes of every file the pass touches, read once up front. Also the
     // restore oracle: after every probe the file must byte-match this.
@@ -847,5 +863,50 @@ mod tests {
     fn tail_keeps_the_end_and_flattens_newlines() {
         assert_eq!(tail("abc\ndef", 4), " def");
         assert_eq!(tail("ab", 4), "ab");
+    }
+
+    fn mutants_named(names: &[&str]) -> Vec<MutantConfig> {
+        names
+            .iter()
+            .map(|n| MutantConfig {
+                name: n.to_string(),
+                file: "code.txt".to_string(),
+                target: "a".to_string(),
+                replacement: "b".to_string(),
+            })
+            .collect()
+    }
+
+    #[test]
+    fn select_unions_repeated_only_values_in_config_order_without_duplicates() {
+        let ms = mutants_named(&["A07 x", "A08 y", "A09 z"]);
+        let sel = select_mutants(&ms, &["A09".into(), "A07".into()]).unwrap();
+        let names: Vec<&str> = sel.iter().map(|m| m.name.as_str()).collect();
+        assert_eq!(
+            names,
+            vec!["A07 x", "A09 z"],
+            "config order, not flag order"
+        );
+        let overlapping = select_mutants(&ms, &["A0".into(), "A07".into()]).unwrap();
+        assert_eq!(
+            overlapping.len(),
+            3,
+            "a mutant matched by two values is selected once"
+        );
+    }
+
+    #[test]
+    fn select_errors_per_value_naming_the_value_that_matched_nothing() {
+        let ms = mutants_named(&["A07 x"]);
+        let err = select_mutants(&ms, &["A07".into(), "B99".into()]).unwrap_err();
+        assert!(err.contains("B99"), "the error names the dead value: {err}");
+    }
+
+    #[test]
+    fn select_with_no_values_takes_everything_and_an_empty_config_errors() {
+        let ms = mutants_named(&["A07 x", "A08 y"]);
+        assert_eq!(select_mutants(&ms, &[]).unwrap().len(), 2);
+        let err = select_mutants(&[], &[]).unwrap_err();
+        assert!(err.contains("no [[mutants]]"), "{err}");
     }
 }
