@@ -269,6 +269,78 @@ replacement = "GUARD off"
 }
 
 #[test]
+fn killed_without_captured_killer_warns_loudly() {
+    // Forge-shaped FAIL lines nest ']' inside the reason (custom errors pretty-print
+    // integers as "65534 [6.553e4]"), so the natural '\[FAIL[^\]]*\] (\S+)' captures
+    // no killer there while capturing fine on a bracket-free reason. The kill still
+    // scores, and the attribution gap is printed — naming the mutant and the fact
+    // that the pattern worked on other mutants — instead of a silently empty
+    // killedBy.
+    let dir = unique_dir("attribution-gap");
+    let code = "GUARD on\nCAP 10\n";
+    std::fs::create_dir_all(&dir).unwrap();
+    std::fs::write(dir.join("code.txt"), code).unwrap();
+    std::fs::write(
+        dir.join("check.sh"),
+        r#"
+p=0; f=0
+if grep -q "GUARD on" code.txt; then p=$((p+1)); else echo "[FAIL: DataTooLarge(65534 [6.553e4])] guard_test (gas: 500)"; f=$((f+1)); fi
+if grep -q "CAP 10" code.txt; then p=$((p+1)); else echo "[FAIL: cap exceeded] cap_test (gas: 9)"; f=$((f+1)); fi
+echo "$p passed | $f failed"
+[ "$f" -eq 0 ] || exit 1
+"#,
+    )
+    .unwrap();
+    let config = r#"
+[suite]
+root = "."
+command = ["sh", "check.sh"]
+proof = '(\d+) passed \| (\d+) failed'
+fail-pattern = '\[FAIL[^\]]*\] (\S+)'
+timeout-secs = 60
+
+[[mutants]]
+name = "M-bracketed guard off"
+file = "code.txt"
+target = "GUARD on"
+replacement = "GUARD off"
+
+[[mutants]]
+name = "M-plain cap change"
+file = "code.txt"
+target = "CAP 10"
+replacement = "CAP 99"
+"#;
+    let config_path = dir.join("mutants.toml");
+    std::fs::write(&config_path, config).unwrap();
+    let (exit, out, report) = run(&config_path, &[]);
+    assert_eq!(exit, 0, "both mutants are killed; output:\n{out}");
+    assert_eq!(report["mutants"][0]["verdict"].as_str(), Some("KILLED"));
+    assert!(
+        report["mutants"][0].get("killed_by").is_none(),
+        "the nested-']' FAIL line defeats the natural pattern's capture:\n{report}"
+    );
+    assert_eq!(
+        report["mutants"][1]["killed_by"][0].as_str(),
+        Some("cap_test"),
+        "the bracket-free FAIL line is captured fine"
+    );
+    assert!(
+        out.contains("M-bracketed guard off") && out.contains("no killer captured"),
+        "the attribution gap is loud and names the mutant:\n{out}"
+    );
+    assert!(
+        out.contains("captured killers on other mutants"),
+        "the warning says the pattern DID work elsewhere:\n{out}"
+    );
+    assert!(
+        !out.contains("M-plain cap change: no killer captured"),
+        "no warning for the attributed kill:\n{out}"
+    );
+    let _ = std::fs::remove_dir_all(&dir);
+}
+
+#[test]
 fn only_filter_narrows_the_pass() {
     let dir = unique_dir("only");
     let code = "GUARD on\nCAP 10\nMODE strict\n";
