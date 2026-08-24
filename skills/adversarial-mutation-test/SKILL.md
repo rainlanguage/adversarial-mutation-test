@@ -219,6 +219,13 @@ null and never omitted.
   while the suite is untouched.
 - Coverage ≠ correctness: green, mutant-killing tests can enshrine a bug;
   re-derive expected values from spec.
+- Correctness over consumer compatibility: when a finding forks doc-fix vs
+  behavior-fix, decide only which behavior is CORRECT — downstream breakage
+  is a migration line item in the finding, never a reason to document the
+  defect instead of fixing it. Version pinning already makes every break
+  opt-in, and a downstream artifact that depends on the defect is evidence
+  FOR the fix (the defect is spreading), filed as that consumer's own
+  migration issue.
 - Exhaust, don't sample — loop until a full pass adds nothing; pace, never
   truncate.
 - Durable state over conversation memory: committed tests and issues are the
