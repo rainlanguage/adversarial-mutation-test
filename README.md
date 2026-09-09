@@ -100,6 +100,7 @@ root = "."
 command = ["nix", "develop", "-c", "cargo", "test"]
 proof = '(\d+) passed; (\d+) failed'
 fail-pattern = 'test (\S+) \.\.\. FAILED'   # optional: names the killer
+                                             # forge: '\[FAIL.*\] (\S+)' — see below
 timeout-secs = 1800                          # optional
 
 [[mutants]]
@@ -119,6 +120,15 @@ probed mutant is killed; 1 on any non-kill; 2 when the pass cannot be trusted.
 `--only <substring>` re-runs a subset while strengthening a killer — repeatable,
 the selections union, and each value must match something; `--json <path>`
 writes the machine-readable report.
+
+For forge suites use the greedy `fail-pattern = '\[FAIL.*\] (\S+)'`, which
+anchors on a line's last `]`. The natural-looking `'\[FAIL[^\]]*\] (\S+)'` stops
+at the first nested `]` — forge puts brackets inside `[FAIL: ...]` reasons
+(custom errors pretty-print integers as `65534 [6.553e4]`; fuzz counterexamples
+embed `args=[...]`) — so the capture never reaches the test name and attribution
+drops on exactly the most informative failures. The probe warns whenever a
+mutant is killed but the configured fail-pattern captured no killer, so that gap
+is loud rather than a silently empty `killedBy`.
 
 ## Scan record template
 
