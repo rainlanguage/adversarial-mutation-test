@@ -228,3 +228,223 @@ fn a_working_tree_off_head_or_a_bad_suite_file_is_refused() {
     assert!(String::from_utf8_lossy(&nested.stderr).contains("top level"));
     let _ = std::fs::remove_dir_all(&dir);
 }
+
+#[test]
+fn output_omits_unset_fields_and_reports_counts() {
+    let dir = repo("fields");
+    let out = gen(&dir, &[]);
+    let stdout = String::from_utf8(out.stdout).unwrap();
+    assert!(!stdout.contains("delete = false"), "{stdout}");
+    let v: toml::Table = toml::from_str(&stdout).unwrap();
+    let file = v["mutants"][6].as_table().unwrap();
+    assert_eq!(file["name"].as_str(), Some("G0007 extra.txt delete-file"));
+    assert!(!file.contains_key("target") && !file.contains_key("replacement"));
+    assert_eq!(String::from_utf8_lossy(&out.stderr), "8 mutants\n");
+
+    let shards = gen(&dir, &["--shard-size", "3", "--out-dir", "shards"]);
+    assert_eq!(
+        String::from_utf8_lossy(&shards.stdout),
+        "shards/shard-001.toml\t3\nshards/shard-002.toml\t3\nshards/shard-003.toml\t2\n"
+    );
+    assert_eq!(
+        String::from_utf8_lossy(&shards.stderr),
+        "8 mutants in 3 shards\n"
+    );
+    let _ = std::fs::remove_dir_all(&dir);
+}
+
+#[test]
+fn shard_flags_are_validated() {
+    let dir = repo("shardflags");
+    let zero = gen(&dir, &["--shard-size", "0", "--out-dir", "z"]);
+    assert_eq!(zero.status.code(), Some(2));
+    assert!(String::from_utf8_lossy(&zero.stderr).contains("--shard-size needs a positive integer"));
+    let alone = gen(&dir, &["--shard-size", "3"]);
+    assert_eq!(alone.status.code(), Some(2));
+    assert!(
+        String::from_utf8_lossy(&alone.stderr).contains("--shard-size and --out-dir go together")
+    );
+    let one = gen(&dir, &["--shard-size", "1", "--out-dir", "ones"]);
+    assert!(
+        one.status.success(),
+        "{}",
+        String::from_utf8_lossy(&one.stderr)
+    );
+    assert!(dir.join("ones/shard-008.toml").exists());
+    let _ = std::fs::remove_dir_all(&dir);
+}
+
+#[test]
+fn modes_encodings_and_deletions_pick_what_is_mutated() {
+    let dir = repo("modes");
+    std::fs::write(dir.join("run.sh"), "go = 1\n").unwrap();
+    std::fs::set_permissions(
+        dir.join("run.sh"),
+        std::os::unix::fs::PermissionsExt::from_mode(0o755),
+    )
+    .unwrap();
+    git(&dir, &["add", "run.sh"]);
+    std::os::unix::fs::symlink("code.txt", dir.join("link")).unwrap();
+    std::fs::write(dir.join("bin.dat"), b"\xff = 1\n").unwrap();
+    git(&dir, &["rm", "-q", "check.sh"]);
+    git(&dir, &["add", "link", "bin.dat"]);
+    git(&dir, &["commit", "-qm", "modes"]);
+    let out = gen(&dir, &[]);
+    assert!(
+        out.status.success(),
+        "{}",
+        String::from_utf8_lossy(&out.stderr)
+    );
+    let out = String::from_utf8(out.stdout).unwrap();
+    assert!(
+        out.contains("# skipped: bin.dat (not UTF-8)\n# skipped: link (mode 120000)\n\n"),
+        "{out}"
+    );
+    assert!(!out.contains("# skipped: check.sh"), "{out}");
+    let names = names(&out);
+    assert!(
+        names.contains(&"G0009 run.sh delete-file".to_string()),
+        "{names:?}"
+    );
+    assert!(
+        names.contains(&"G0010 run.sh:1:6 1 -> 2".to_string()),
+        "{names:?}"
+    );
+    let _ = std::fs::remove_dir_all(&dir);
+}
+
+#[test]
+fn staged_changes_are_refused_and_unrelated_edits_are_ignored() {
+    let dir = repo("staged");
+    std::fs::write(dir.join("code.txt"), "staged\n").unwrap();
+    git(&dir, &["add", "code.txt"]);
+    let staged = gen(&dir, &[]);
+    assert_eq!(staged.status.code(), Some(2));
+    assert!(String::from_utf8_lossy(&staged.stderr).contains("code.txt differs from HEAD"));
+    git(&dir, &["reset", "-q", "--hard"]);
+
+    std::fs::write(dir.join("check.sh"), "unrelated\n").unwrap();
+    let unrelated = gen(&dir, &[]);
+    assert!(
+        unrelated.status.success(),
+        "{}",
+        String::from_utf8_lossy(&unrelated.stderr)
+    );
+    assert_eq!(
+        names(&String::from_utf8(unrelated.stdout).unwrap()),
+        EXPECTED
+    );
+    let _ = std::fs::remove_dir_all(&dir);
+}
+
+#[test]
+fn paths_that_parse_as_revisions_stay_paths() {
+    let dir = repo("literal");
+    git(&dir, &["checkout", "-q", "main"]);
+    std::fs::write(dir.join("(literal)code.txt"), "decoy\n").unwrap();
+    git(&dir, &["add", "(literal)code.txt"]);
+    git(&dir, &["commit", "-qm", "decoy"]);
+    git(&dir, &["checkout", "-q", "branch"]);
+    git(&dir, &["merge", "-q", "--no-edit", "main"]);
+    let all = gen(&dir, &[]);
+    assert!(
+        all.status.success(),
+        "{}",
+        String::from_utf8_lossy(&all.stderr)
+    );
+    assert_eq!(names(&String::from_utf8(all.stdout).unwrap()), EXPECTED);
+    let narrowed = gen(&dir, &["--", ":(literal)code.txt"]);
+    assert!(
+        narrowed.status.success(),
+        "{}",
+        String::from_utf8_lossy(&narrowed.stderr)
+    );
+    assert_eq!(
+        names(&String::from_utf8(narrowed.stdout).unwrap()),
+        EXPECTED[..6]
+    );
+    let _ = std::fs::remove_dir_all(&dir);
+}
+
+/// Files whose added lines move under each diff knob that user or repo config can turn.
+fn knob_repo() -> PathBuf {
+    let dir = std::env::temp_dir().join(format!("mutation-gen-knobs-{}", std::process::id()));
+    let _ = std::fs::remove_dir_all(&dir);
+    std::fs::create_dir_all(&dir).unwrap();
+    git(&dir, &["init", "-q"]);
+    let write = |name: &str, body: &str| std::fs::write(dir.join(name), body).unwrap();
+    write(".gitattributes", "tc.txt diff=pre\n");
+    write("pre.sh", "echo pre; cat \"$1\"\n");
+    write("indent.txt", "1\n2\na\n\nb\n3\n4\n");
+    write("alg.txt", "b\na\nx\na\nx\nx\nc\n");
+    write("gap.txt", "a\nb\nc\n");
+    write("old.txt", "r1\nr2\nr3\nr4\nr5\n");
+    write("tc.txt", "t\n");
+    git(&dir, &["add", "."]);
+    git(&dir, &["commit", "-qm", "base"]);
+    git(&dir, &["checkout", "-qb", "branch"]);
+    write("indent.txt", "1\n2\na\n\nb\na\n\nb\n3\n4\n");
+    write("alg.txt", "b\na\nx\nx\na\nx\na\n");
+    write("gap.txt", "A\nb\nC\n");
+    std::fs::remove_file(dir.join("old.txt")).unwrap();
+    write("new.txt", "r1\nr2\nr3\nr4\nR5\n");
+    write("tc.txt", "t\nu\n");
+    git(&dir, &["add", "-A"]);
+    git(&dir, &["commit", "-qm", "change"]);
+    write(
+        "order.txt",
+        "tc.txt\nnew.txt\ngap.txt\nalg.txt\nindent.txt\n",
+    );
+    std::fs::write(dir.join("suite.toml"), SUITE).unwrap();
+    dir
+}
+
+#[test]
+fn repo_config_cannot_move_the_set() {
+    let dir = knob_repo();
+    let plain = gen(&dir, &[]);
+    assert!(
+        plain.status.success(),
+        "{}",
+        String::from_utf8_lossy(&plain.stderr)
+    );
+    let plain = String::from_utf8(plain.stdout).unwrap();
+    let names = names(&plain);
+    for want in [
+        "alg.txt:5:1 delete-line",
+        "alg.txt:7:1 delete-line",
+        "gap.txt:1:1 delete-line",
+        "gap.txt:3:1 delete-line",
+        "indent.txt:5:1 delete-line",
+        "new.txt delete-file",
+        "tc.txt:2:1 delete-line",
+    ] {
+        assert!(names.iter().any(|n| n.ends_with(want)), "{want}: {names:?}");
+    }
+    assert!(!names.iter().any(|n| n.contains("gap.txt:2:")), "{names:?}");
+    for (key, value) in [
+        ("color.diff", "always"),
+        ("diff.external", "true"),
+        ("diff.pre.textconv", "sh pre.sh"),
+        ("diff.renames", "true"),
+        ("diff.interHunkContext", "3"),
+        ("diff.algorithm", "histogram"),
+        ("diff.indentHeuristic", "false"),
+        ("diff.orderFile", "order.txt"),
+    ] {
+        git(&dir, &["config", key, value]);
+        let out = gen(&dir, &[]);
+        git(&dir, &["config", "--unset", key]);
+        assert!(
+            out.status.success(),
+            "{key}: {}",
+            String::from_utf8_lossy(&out.stderr)
+        );
+        assert_eq!(
+            String::from_utf8(out.stdout).unwrap(),
+            plain,
+            "{key}={value}"
+        );
+    }
+    let _ = std::fs::remove_dir_all(&dir);
+}

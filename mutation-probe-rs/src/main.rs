@@ -644,7 +644,7 @@ fn main() {
                             ),
                         };
                     }
-                    let mutated = original.replacen(target, replacement, 1);
+                    let mutated = original.replace(target, replacement);
                     // Atomic (temp + rename) in both directions: a plain fs::write truncates
                     // first, so a failure mid-write (ENOSPC, EIO) would leave the file
                     // truncated with nothing to restore from on disk.

@@ -50,7 +50,6 @@ fn is_operator(c: Option<char>) -> bool {
 }
 
 /// One edit to one line: the line's new text, plus where and what for the mutant name.
-#[derive(Debug, PartialEq, Eq)]
 struct LineMutation {
     col: usize,
     label: String,
@@ -60,10 +59,9 @@ struct LineMutation {
 /// PURE: a comment line carries no behaviour, so every mutant of it is equivalent.
 fn is_comment(line: &str) -> bool {
     let t = line.trim_start();
-    if ["//", "/*", "*/", "* ", "<!--", "#!/"]
+    if ["//", "/*", "* ", "<!--", "#!/"]
         .iter()
         .any(|p| t.starts_with(p))
-        || t == "*"
     {
         return true;
     }
@@ -275,8 +273,9 @@ fn occurs_once(hay: &str, needle: &str) -> bool {
     let Some(first) = hay.find(needle) else {
         return false;
     };
-    let step = needle.chars().next().map_or(1, char::len_utf8);
-    !hay[first + step..].contains(needle)
+    let mut rest = hay[first..].chars();
+    rest.next();
+    !rest.as_str().contains(needle)
 }
 
 /// PURE: the smallest window of whole lines around line `i` (grown downward, then
@@ -301,9 +300,7 @@ fn unique_window(content: &str, lines: &[&str], i: usize) -> (usize, usize) {
 struct Mutant {
     name: String,
     file: String,
-    #[serde(skip_serializing_if = "Option::is_none")]
     target: Option<String>,
-    #[serde(skip_serializing_if = "Option::is_none")]
     replacement: Option<String>,
     #[serde(skip_serializing_if = "std::ops::Not::not")]
     delete: bool,
@@ -334,16 +331,17 @@ fn file_mutants(c: &Changed) -> Vec<Mutant> {
         let Some(&line) = lines.get(n - 1) else {
             continue;
         };
-        let muts = line_mutations(line);
-        if muts.is_empty() {
-            continue;
-        }
-        let (lo, hi) = unique_window(&c.content, &lines, n - 1);
-        let target = lines[lo..=hi].join("\n");
-        for m in muts {
-            let mut window: Vec<&str> = lines[lo..=hi].to_vec();
-            window[n - 1 - lo] = &m.line;
-            let replacement = window.join("\n");
+        // The window is only searched for once the line has a mutation.
+        let mut window: Option<(usize, String)> = None;
+        for m in line_mutations(line) {
+            let (lo, target) = window.get_or_insert_with(|| {
+                let (lo, hi) = unique_window(&c.content, &lines, n - 1);
+                (lo, lines[lo..=hi].join("\n"))
+            });
+            let mut edited: Vec<&str> = target.split('\n').collect();
+            edited[n - 1 - *lo] = &m.line;
+            let replacement = edited.join("\n");
+            let target = target.clone();
             if out.iter().any(|o: &Mutant| {
                 o.target.as_deref() == Some(&target)
                     && o.replacement.as_deref() == Some(&replacement)
@@ -353,7 +351,7 @@ fn file_mutants(c: &Changed) -> Vec<Mutant> {
             out.push(Mutant {
                 name: format!("{}:{}:{} {}", c.path, n, m.col, m.label),
                 file: c.path.clone(),
-                target: Some(target.clone()),
+                target: Some(target),
                 replacement: Some(replacement),
                 delete: false,
             });
@@ -372,38 +370,43 @@ fn number(mut mutants: Vec<Mutant>) -> Vec<Mutant> {
 }
 
 /// PURE: added line numbers from `git diff -U0` hunk headers (`@@ -a,b +c,d @@`).
-fn added_lines(patch: &str) -> Vec<usize> {
+/// A header that does not parse is an error: skipping it would silently drop lines.
+fn added_lines(patch: &str) -> Result<Vec<usize>, String> {
     let mut out = Vec::new();
     for h in patch.lines().filter(|l| l.starts_with("@@ ")) {
-        let Some(plus) = h.split(' ').find(|w| w.starts_with('+')) else {
-            continue;
+        let malformed = || format!("malformed hunk header {h:?}");
+        let plus = h
+            .split(' ')
+            .find_map(|w| w.strip_prefix('+'))
+            .ok_or_else(malformed)?;
+        let (start, count) = plus.split_once(',').unwrap_or((plus, "1"));
+        let (Ok(start), Ok(count)) = (start.parse::<usize>(), count.parse::<usize>()) else {
+            return Err(malformed());
         };
-        let mut it = plus[1..].splitn(2, ',');
-        let start: usize = it.next().and_then(|s| s.parse().ok()).unwrap_or(0);
-        let count: usize = it.next().map_or(Some(1), |s| s.parse().ok()).unwrap_or(0);
         out.extend(start..start + count);
     }
-    out
+    Ok(out)
 }
 
-/// PURE: (status, new mode, path) entries from `git diff --raw -z`.
-fn raw_entries(raw: &[u8]) -> Vec<(char, String, String)> {
-    let fields: Vec<&[u8]> = raw.split(|&b| b == 0).collect();
-    fields
-        .chunks(2)
-        .filter(|pair| pair.len() == 2)
-        .filter_map(|pair| {
-            let meta = String::from_utf8_lossy(pair[0]);
-            let mut words = meta.trim_start_matches(':').split(' ');
-            let new_mode = words.nth(1)?.to_string();
-            let status = words.nth(2)?.chars().next()?;
-            Some((
-                status,
-                new_mode,
-                String::from_utf8_lossy(pair[1]).into_owned(),
-            ))
-        })
-        .collect()
+/// PURE: (status, new mode, path) entries from `git diff --raw -z --no-renames`, where
+/// every entry is one meta field then one path field. A meta field that does not parse
+/// is an error: skipping it would silently drop a file.
+fn raw_entries(raw: &[u8]) -> Result<Vec<(String, String, String)>, String> {
+    let mut fields = raw.split(|&b| b == 0);
+    let mut out = Vec::new();
+    while let (Some(meta), Some(path)) = (fields.next(), fields.next()) {
+        let meta = String::from_utf8_lossy(meta);
+        let words: Vec<&str> = meta.trim_start_matches(':').split(' ').collect();
+        let [_, mode, _, _, status] = words[..] else {
+            return Err(format!("malformed raw diff entry {meta:?}"));
+        };
+        out.push((
+            status.to_string(),
+            mode.to_string(),
+            String::from_utf8_lossy(path).into_owned(),
+        ));
+    }
+    Ok(out)
 }
 
 // -------------------------------------------------------------------- git ----
@@ -415,7 +418,6 @@ const DIFF_FLAGS: &[&str] = &[
     "--no-ext-diff",
     "--no-textconv",
     "--no-renames",
-    "--no-relative",
     "--diff-algorithm=myers",
     "--indent-heuristic",
     "--inter-hunk-context=0",
@@ -423,7 +425,6 @@ const DIFF_FLAGS: &[&str] = &[
 
 fn git(args: &[&str]) -> Result<Vec<u8>, String> {
     let out = Command::new("git")
-        .args(["-c", "core.quotePath=false"])
         .args(args)
         .output()
         .map_err(|e| format!("cannot run git: {e}"))?;
@@ -454,19 +455,19 @@ fn generate(base: &str, pathspecs: &[String]) -> Result<Generated, String> {
             "run from the repository's top level: generated paths are relative to it".into(),
         );
     }
-    let head = git_line(&["rev-parse", "--verify", "HEAD^{commit}"])?;
+    let head = git_line(&["rev-parse", "HEAD^{commit}"])?;
     let mb = git_line(&["merge-base", base, &head])?;
     let mut raw_args: Vec<&str> = vec!["diff", "--raw", "-z"];
     raw_args.extend(DIFF_FLAGS);
     raw_args.extend([mb.as_str(), head.as_str(), "--"]);
     raw_args.extend(pathspecs.iter().map(String::as_str));
-    let mut entries = raw_entries(&git(&raw_args)?);
+    let mut entries = raw_entries(&git(&raw_args)?)?;
     entries.sort_by(|a, b| a.2.cmp(&b.2));
 
     let mut mutants = Vec::new();
     let mut skipped = Vec::new();
     for (status, mode, path) in entries {
-        if !matches!(status, 'A' | 'M' | 'T') {
+        if !matches!(status.as_str(), "A" | "M" | "T") {
             continue;
         }
         if mode != "100644" && mode != "100755" {
@@ -492,11 +493,12 @@ fn generate(base: &str, pathspecs: &[String]) -> Result<Generated, String> {
         };
         let mut patch_args: Vec<&str> = vec!["diff", "-U0"];
         patch_args.extend(DIFF_FLAGS);
-        patch_args.extend([mb.as_str(), head.as_str(), "--", literal.as_str()]);
+        // Against the working tree, which matches HEAD for this path (checked above).
+        patch_args.extend([mb.as_str(), "--", literal.as_str()]);
         let patch = String::from_utf8_lossy(&git(&patch_args)?).into_owned();
         mutants.extend(file_mutants(&Changed {
-            added: status == 'A',
-            lines: added_lines(&patch),
+            added: status == "A",
+            lines: added_lines(&patch)?,
             content,
             path,
         }));
@@ -849,18 +851,130 @@ mod tests {
     #[test]
     fn hunk_headers_give_added_lines() {
         let patch = "diff --git a/f b/f\n@@ -1,0 +1,2 @@\n+a\n+b\n@@ -9 +10 @@\n-x\n+y\n@@ -20,3 +21,0 @@\n-q\n";
-        assert_eq!(added_lines(patch), vec![1, 2, 10]);
+        assert_eq!(added_lines(patch), Ok(vec![1, 2, 10]));
+        for bad in ["@@ -1 @@", "@@ -1 +x,2 @@", "@@ -1 +3,y @@"] {
+            assert_eq!(
+                added_lines(bad),
+                Err(format!("malformed hunk header {bad:?}"))
+            );
+        }
+    }
+
+    #[test]
+    fn every_token_swap_replaces_with_its_partner() {
+        for (line, want) in [
+            ("a === b", "a !== b"),
+            ("a !== b", "a === b"),
+            ("a == b", "a != b"),
+            ("a != b", "a == b"),
+            ("a <= b", "a < b"),
+            ("a >= b", "a > b"),
+            ("a && b", "a || b"),
+            ("a || b", "a && b"),
+            ("a += b", "a -= b"),
+            ("a -= b", "a += b"),
+            ("a < b", "a <= b"),
+            ("a > b", "a >= b"),
+            ("a + b", "a - b"),
+            ("a - b", "a + b"),
+            ("a * b", "a / b"),
+            ("a / b", "a * b"),
+            ("a = true", "a = false"),
+            ("a = false", "a = true"),
+        ] {
+            let got = labels(line);
+            assert_eq!(got.len(), 2, "{line:?}: {got:?}");
+            assert_eq!(got[0].2, want, "{line:?}");
+        }
+    }
+
+    #[test]
+    fn bang_and_booleans_touching_identifiers_are_not_operators() {
+        assert_eq!(
+            labels("a !== b"),
+            vec![l(3, "!== -> ===", "a === b"), l(1, "delete-line", "")]
+        );
+        assert_eq!(labels("istrue"), vec![l(1, "delete-line", "")]);
+        assert_eq!(labels("true_x"), vec![l(1, "delete-line", "")]);
+    }
+
+    #[test]
+    fn code_after_a_block_comment_close_is_mutated() {
+        assert_eq!(
+            labels("*/ x = 1"),
+            vec![
+                l(8, "1 -> 2", "*/ x = 2"),
+                l(8, "1 -> 0", "*/ x = 0"),
+                l(1, "delete-line", "")
+            ]
+        );
+    }
+
+    #[test]
+    fn two_digit_leading_zero_is_octal_and_non_ascii_is_stepped_over() {
+        assert_eq!(labels("x = 07"), vec![l(1, "delete-line", "")]);
+        assert_eq!(
+            literal_mutations("é1")
+                .into_iter()
+                .map(|m| (m.col, m.line))
+                .collect::<Vec<_>>(),
+            vec![(3, "é2".to_string()), (3, "é0".to_string())]
+        );
+    }
+
+    #[test]
+    fn list_strings_brackets_and_escapes_delimit_entries() {
+        let lines =
+            |s: &str| -> Vec<String> { entry_deletions(s).into_iter().map(|m| m.line).collect() };
+        assert_eq!(lines(r#"["", a]"#), vec!["[a]", r#"[""]"#]);
+        assert_eq!(lines(r#"["a\"b", c]"#), vec!["[c]", r#"["a\"b"]"#]);
+        assert_eq!(lines(r#"["a\\", b]"#), vec!["[b]", r#"["a\\"]"#]);
+        assert!(lines(r#"["a, b"#).is_empty());
+        assert_eq!(lines("][a, b]"), vec!["][b]", "][a]"]);
+        assert!(lines("[a, b)").is_empty());
+        assert!(lines("(a, b]").is_empty());
+    }
+
+    #[test]
+    fn window_alternates_down_then_up_and_stops_at_the_last_line() {
+        let content = "p\na\nb\nq\na\nb\nr";
+        let lines: Vec<&str> = content.split('\n').collect();
+        assert_eq!(unique_window(content, &lines, 1), (0, 2));
+        let content = "a\nb\na\nc";
+        let lines: Vec<&str> = content.split('\n').collect();
+        assert_eq!(unique_window(content, &lines, 2), (2, 3));
+        let content = "a\nb\na";
+        let lines: Vec<&str> = content.split('\n').collect();
+        assert_eq!(unique_window(content, &lines, 2), (1, 2));
+    }
+
+    #[test]
+    fn identical_edits_of_one_line_are_emitted_once() {
+        let c = Changed {
+            path: "f".into(),
+            added: false,
+            lines: vec![1],
+            content: "xs = [a, a]\n".into(),
+        };
+        let names: Vec<String> = file_mutants(&c).into_iter().map(|m| m.name).collect();
+        assert_eq!(names, ["f:1:7 delete-entry", "f:1:1 delete-line"]);
     }
 
     #[test]
     fn raw_entries_parse_status_mode_and_path() {
         let raw = b":000000 100644 0000000 abcdef0 A\0new file.rs\0:100644 120000 1 2 T\0link\0";
+        let entry = |s: &str, m: &str, p: &str| (s.to_string(), m.to_string(), p.to_string());
         assert_eq!(
             raw_entries(raw),
-            vec![
-                ('A', "100644".to_string(), "new file.rs".to_string()),
-                ('T', "120000".to_string(), "link".to_string()),
-            ]
+            Ok(vec![
+                entry("A", "100644", "new file.rs"),
+                entry("T", "120000", "link"),
+            ])
+        );
+        assert_eq!(raw_entries(b""), Ok(vec![]));
+        assert_eq!(
+            raw_entries(b":100644 100644 1 2\0f\0"),
+            Err(r#"malformed raw diff entry ":100644 100644 1 2""#.to_string())
         );
     }
 

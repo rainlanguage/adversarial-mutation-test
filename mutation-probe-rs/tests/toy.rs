@@ -123,12 +123,31 @@ fn weak_suite_scores_all_four_verdicts_and_restores() {
         Some("guard_test"),
         "fail-pattern names the killer"
     );
+    assert_eq!(
+        report["mutants"][3]["detail"].as_str(),
+        Some("target occurs 0x (need exactly 1) — mutates nothing")
+    );
     assert_eq!(report["baseline"]["passed"].as_u64(), Some(2));
     assert_eq!(
         std::fs::read_to_string(dir.join("code.txt")).unwrap(),
         code,
         "the tree must be restored byte-exact after the pass"
     );
+    let _ = std::fs::remove_dir_all(&dir);
+}
+
+#[test]
+fn a_mutant_that_cannot_be_written_aborts_naming_the_file() {
+    let dir = unique_dir("unwritable");
+    let code = "GUARD on\nCAP 10\nMODE strict\n";
+    toy(&dir, code);
+    // write_atomic's temp path, occupied by a directory, so the mutant write fails.
+    std::fs::create_dir_all(dir.join("code.mutation-probe.tmp")).unwrap();
+    let config = write_config(&dir, ALL_FOUR);
+    let (exit, out, _) = run(&config, &["--only", "M-kill"]);
+    assert_eq!(exit, 2, "{out}");
+    assert!(out.contains("cannot write mutant to code.txt"), "{out}");
+    assert_eq!(std::fs::read_to_string(dir.join("code.txt")).unwrap(), code);
     let _ = std::fs::remove_dir_all(&dir);
 }
 
