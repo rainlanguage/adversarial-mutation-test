@@ -275,6 +275,7 @@ fn shard_flags_are_validated() {
 }
 
 #[test]
+#[cfg(unix)]
 fn modes_encodings_and_deletions_pick_what_is_mutated() {
     let dir = repo("modes");
     std::fs::write(dir.join("run.sh"), "go = 1\n").unwrap();
@@ -313,6 +314,31 @@ fn modes_encodings_and_deletions_pick_what_is_mutated() {
     let _ = std::fs::remove_dir_all(&dir);
 }
 
+#[test]
+fn text_files_git_would_diff_as_binary_are_still_mutated() {
+    let dir = repo("binary");
+    std::fs::write(dir.join(".gitattributes"), "attr.txt -diff\n").unwrap();
+    std::fs::write(dir.join("attr.txt"), "n = 1\n").unwrap();
+    std::fs::write(dir.join("nul.txt"), "a\0b\nn = 1\n").unwrap();
+    git(&dir, &["add", ".gitattributes", "attr.txt", "nul.txt"]);
+    git(&dir, &["commit", "-qm", "binary to git"]);
+    let out = gen(&dir, &[]);
+    assert!(
+        out.status.success(),
+        "{}",
+        String::from_utf8_lossy(&out.stderr)
+    );
+    let names = names(&String::from_utf8(out.stdout).unwrap());
+    assert!(
+        names.iter().any(|n| n.ends_with(" attr.txt:1:5 1 -> 2")),
+        "{names:?}"
+    );
+    assert!(
+        names.iter().any(|n| n.ends_with(" nul.txt:2:5 1 -> 2")),
+        "{names:?}"
+    );
+    let _ = std::fs::remove_dir_all(&dir);
+}
 #[test]
 fn staged_changes_are_refused_and_unrelated_edits_are_ignored() {
     let dir = repo("staged");

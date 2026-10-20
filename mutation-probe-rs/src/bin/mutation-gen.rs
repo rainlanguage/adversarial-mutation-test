@@ -415,6 +415,7 @@ fn raw_entries(raw: &[u8]) -> Result<Vec<(String, String, String)>, String> {
 /// of added lines cannot differ between machines.
 const DIFF_FLAGS: &[&str] = &[
     "--no-color",
+    "--text",
     "--no-ext-diff",
     "--no-textconv",
     "--no-renames",

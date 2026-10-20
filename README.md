@@ -138,6 +138,9 @@ nix run github:rainlanguage/adversarial-mutation-test#mutation-gen -- \
   -- . ':(exclude)test/**'
 ```
 
+`suite.toml` holds only the `[suite]` table. Its `root` is resolved from each
+shard's own location, so with `--out-dir gen` it is `root = ".."`.
+
 Every changed line is crossed with each catalog operator that applies to it
 (comparison, logical, arithmetic and boolean swaps, prefix `!` removal, integer
 literal ±1, line deletion), every added file gets a `delete = true` mutant, and
