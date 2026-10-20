@@ -119,12 +119,11 @@ Verdicts: `KILLED` (failing tally, or non-zero exit with proof of a run) /
 compile error, timeout — never scored as survived) / `HARNESS-ERROR` (target not
 matched exactly once). A red, silent, or zero-test baseline aborts before any
 probe; writes are atomic, keep the file's mode, and every restore is verified
-byte-exact; a hung
-suite's whole process group is killed at `timeout-secs`. Exit 0 only when every
-probed mutant is killed; 1 on any non-kill; 2 when the pass cannot be trusted.
-`--only <substring>` re-runs a subset while strengthening a killer — repeatable,
-the selections union, and each value must match something; `--json <path>`
-writes the machine-readable report.
+byte-exact; a hung suite's whole process group is killed at `timeout-secs`. Exit
+0 only when every probed mutant is killed; 1 on any non-kill; 2 when the pass
+cannot be trusted. `--only <substring>` re-runs a subset while strengthening a
+killer — repeatable, the selections union, and each value must match something;
+`--json <path>` writes the machine-readable report.
 
 ## Deterministic mutants from a diff (`mutation-gen`)
 

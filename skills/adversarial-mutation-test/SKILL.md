@@ -16,9 +16,8 @@ PR / function is just a narrowed target.
 Whole-repo runs are ultracode-shaped: fan out with the native Workflow tool
 (`agent()` / `parallel()` / `pipeline()`, schema-forced returns,
 `resumeFromRunId`, `budget`); a narrowed scope runs inline and serial, unless
-its generated mutant set needs more than one shard (below).
-"Orchestrator" below means the Workflow author when fanned out, the serial
-driver when not.
+its generated mutant set needs more than one shard (below). "Orchestrator" below
+means the Workflow author when fanned out, the serial driver when not.
 
 ## Durable progress — two roles, kept separate
 
@@ -94,8 +93,8 @@ adversarial pass judges covered behaviors too.
    test code** — a target in the oracle co-mutates the expectation and voids the
    probe.
 
-   On a `pr:<n>` scope the mutants file starts from the generated floor
-   (next section), and hand-written mutants go on top.
+   On a `pr:<n>` scope the mutants file starts from the generated floor (next
+   section), and hand-written mutants go on top.
 4. **Act on verdicts — step 2's survivor set is the worklist.** KILLED =
    covered: credit the killing test in the ledger. SURVIVED = a real gap: if an
    existing test purports to cover the behavior, strengthen it in place until it
@@ -114,8 +113,8 @@ adversarial pass judges covered behaviors too.
 
 A PR's local pre-run and its reviewer converge only if they probe the same set,
 and hand-written mutants differ run to run. The floor is mechanical: in the
-clone's top level, on the PR head, with `suite.toml` holding only `[suite]`
-(its `root` resolves from each shard, so `"../.."` for the out-dir below):
+clone's top level, on the PR head, with `suite.toml` holding only `[suite]` (its
+`root` resolves from each shard, so `"../.."` for the out-dir below):
 
 ```sh
 nix run github:rainlanguage/adversarial-mutation-test#mutation-gen -- \
@@ -136,15 +135,15 @@ mismatch means base or head moved, never a reason to keep the old set.
 - **Hand-written adversarial mutants go on top**, in their own file with the
   same `[suite]`, named `H…`. The floor is what both runs share; the hand set is
   where each adds judgement, and every one of them still gets probed.
-- **Shards are the unit of probing.** Size `k` like a group (sizing rule
-  above): each mutant is a probe cycle and each survivor a test to write, so
-  start at 25 and regenerate smaller into a fresh `--out-dir` on any null
-  return — re-sharding only re-partitions the same set. One shard runs inline;
-  more fan out, one fresh clone and one probe agent per shard. Every shard's
-  probe pass completes on the untouched PR head before any test is written
-  (step 2's attribution rule spans shards), and the orchestrator unions the
-  verdicts — shards are disjoint and ordered, so the union is the set. The
-  survivors are then sliced into kill batches on the behaviour axis as below.
+- **Shards are the unit of probing.** Size `k` like a group (sizing rule above):
+  each mutant is a probe cycle and each survivor a test to write, so start at 25
+  and regenerate smaller into a fresh `--out-dir` on any null return —
+  re-sharding only re-partitions the same set. One shard runs inline; more fan
+  out, one fresh clone and one probe agent per shard. Every shard's probe pass
+  completes on the untouched PR head before any test is written (step 2's
+  attribution rule spans shards), and the orchestrator unions the verdicts —
+  shards are disjoint and ordered, so the union is the set. The survivors are
+  then sliced into kill batches on the behaviour axis as below.
 
 ## Adversarial correctness pass (per unit — the half that finds bugs)
 
