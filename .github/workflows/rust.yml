@@ -22,4 +22,4 @@ jobs:
         with:
           persist-credentials: false
       - uses: DeterminateSystems/nix-installer-action@a7ad9c4f0c65208097f4d34f3cfa1913b80cce5c # main
-      - run: nix build .#mutation-probe --print-build-logs
+      - run: nix build .#mutation-probe .#mutation-gen --print-build-logs

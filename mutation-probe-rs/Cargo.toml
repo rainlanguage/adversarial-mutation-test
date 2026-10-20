@@ -1,14 +1,18 @@
 [package]
 name = "mutation-probe"
-version = "0.1.0"
+version = "0.2.0"
 edition = "2021"
 rust-version = "1.82"
 license-file = "../LICENSE"
-description = "The skill's probe harness as a tested tool: applies exact-string mutants, proves the suite ran, and scores KILLED/SURVIVED/NO-RUN/HARNESS-ERROR."
+description = "The skill's probe harness as tested tools: mutation-gen enumerates a diff's mutants deterministically; mutation-probe applies them, proves the suite ran, and scores KILLED/SURVIVED/NO-RUN/HARNESS-ERROR."
 
 [[bin]]
 name = "mutation-probe"
 path = "src/main.rs"
+
+[[bin]]
+name = "mutation-gen"
+path = "src/bin/mutation-gen.rs"
 
 [dependencies]
 regex = "1"

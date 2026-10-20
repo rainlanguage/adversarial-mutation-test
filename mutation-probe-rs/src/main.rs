@@ -70,8 +70,38 @@ struct MutantConfig {
     /// File the mutant applies to, relative to `suite.root`.
     file: String,
     /// Must occur EXACTLY once in the file, or the mutant is a HARNESS-ERROR.
-    target: String,
-    replacement: String,
+    target: Option<String>,
+    replacement: Option<String>,
+    /// Removes the whole file for the probe instead of editing it.
+    #[serde(default)]
+    delete: bool,
+}
+
+/// What a mutant does to its file, once its config shape is checked.
+#[derive(Debug)]
+enum Edit<'a> {
+    Replace {
+        target: &'a str,
+        replacement: &'a str,
+    },
+    Delete,
+}
+
+impl MutantConfig {
+    /// PURE: a mutant is EITHER `delete = true` OR a target + replacement pair.
+    fn edit(&self) -> Result<Edit<'_>, String> {
+        match (self.delete, &self.target, &self.replacement) {
+            (true, None, None) => Ok(Edit::Delete),
+            (false, Some(target), Some(replacement)) => Ok(Edit::Replace {
+                target,
+                replacement,
+            }),
+            _ => Err(format!(
+                "mutant {:?}: give `delete = true` alone, or both `target` and `replacement`",
+                self.name
+            )),
+        }
+    }
 }
 
 /// PURE: which mutants the --only values select, or why selection aborts.
@@ -280,10 +310,17 @@ const CAPTURE_CAP: usize = 4 * 1024 * 1024;
 
 /// Write via temp-file + rename in the target's own directory: rename is atomic on a
 /// same-filesystem move, so the target is always either its old or its new content —
-/// never truncated by a failed write.
-fn write_atomic(path: &std::path::Path, content: &str) -> Result<(), String> {
+/// never truncated by a failed write. The temp file is a new inode, so the file's
+/// permissions are set on it explicitly, or an executable would probe non-executable.
+fn write_atomic(
+    path: &std::path::Path,
+    content: &str,
+    permissions: &std::fs::Permissions,
+) -> Result<(), String> {
     let tmp = path.with_extension("mutation-probe.tmp");
     std::fs::write(&tmp, content).map_err(|e| format!("writing {}: {e}", tmp.display()))?;
+    std::fs::set_permissions(&tmp, permissions.clone())
+        .map_err(|e| format!("setting permissions on {}: {e}", tmp.display()))?;
     std::fs::rename(&tmp, path).map_err(|e| format!("renaming over {}: {e}", path.display()))
 }
 
@@ -456,6 +493,14 @@ MUTANTS FILE (TOML)
     target = "if !ok {"           # must occur EXACTLY once in the file
     replacement = "if ok {"
 
+    [[mutants]]
+    name = "M02 module removed"
+    file = "src/extra.rs"
+    delete = true                 # instead of target + replacement: the file is
+                                  # removed for the probe, then restored
+
+    mutation-gen writes these files from a git diff (mutation-gen --help).
+
 VERDICTS
     KILLED         suite ran and failed (failing tally, or non-zero exit with proof
                    present — the tally is trusted over a lying wrapper exit code,
@@ -467,9 +512,9 @@ VERDICTS
 
 INTEGRITY (enforced)
     A red, silent, or zero-test baseline aborts before any probe. Writes are
-    atomic (temp + rename): no failure mode leaves a file truncated. Every
-    restore is verified byte-exact, and each file is re-checked pristine before
-    the next mutant. Suite output is capped per stream (oldest bytes dropped).
+    atomic (temp + rename) and keep the file's mode: no failure mode leaves a
+    file truncated. Every restore is verified byte-exact, and each file is
+    re-checked pristine before the next mutant. Suite output is capped per stream (oldest bytes dropped).
 
 EXIT CODES
     0  baseline green and every probed mutant KILLED
@@ -538,6 +583,11 @@ fn main() {
 
     let selected: Vec<&MutantConfig> =
         select_mutants(&cfg.mutants, &only).unwrap_or_else(|e| fail(&e));
+    for m in &cfg.mutants {
+        if let Err(e) = m.edit() {
+            fail(&e);
+        }
+    }
 
     // Original bytes of every file the pass touches, read once up front. Also the
     // restore oracle: after every probe the file must byte-match this.
@@ -577,24 +627,37 @@ fn main() {
                     m.file
                 ));
             }
-            let occurrences = original.matches(m.target.as_str()).count();
-            if occurrences != 1 {
-                break 'v Verdict::HarnessError {
-                    detail: format!(
-                        "target occurs {occurrences}x (need exactly 1) — mutates nothing"
-                    ),
-                };
+            let permissions = std::fs::metadata(&path)
+                .map(|md| md.permissions())
+                .unwrap_or_else(|e| fail(&format!("cannot stat {}: {e}", m.file)));
+            match m.edit().expect("mutant shapes are checked at load") {
+                Edit::Replace {
+                    target,
+                    replacement,
+                } => {
+                    let occurrences = original.matches(target).count();
+                    if occurrences != 1 {
+                        break 'v Verdict::HarnessError {
+                            detail: format!(
+                                "target occurs {occurrences}x (need exactly 1) — mutates nothing"
+                            ),
+                        };
+                    }
+                    let mutated = original.replacen(target, replacement, 1);
+                    // Atomic (temp + rename) in both directions: a plain fs::write truncates
+                    // first, so a failure mid-write (ENOSPC, EIO) would leave the file
+                    // truncated with nothing to restore from on disk.
+                    write_atomic(&path, &mutated, &permissions).unwrap_or_else(|e| {
+                        fail(&format!("cannot write mutant to {}: {e}", m.file))
+                    });
+                }
+                Edit::Delete => std::fs::remove_file(&path)
+                    .unwrap_or_else(|e| fail(&format!("cannot delete {}: {e}", m.file))),
             }
-            let mutated = original.replacen(m.target.as_str(), &m.replacement, 1);
-            // Atomic (temp + rename) in both directions: a plain fs::write truncates
-            // first, so a failure mid-write (ENOSPC, EIO) would leave the file
-            // truncated with nothing to restore from on disk.
-            write_atomic(&path, &mutated)
-                .unwrap_or_else(|e| fail(&format!("cannot write mutant to {}: {e}", m.file)));
             let outcome = run_suite(&cfg.suite, &root, &proof);
             // Restore before anything can early-return, then verify byte-exact: a tree
             // left mutated poisons every later probe and the working copy itself.
-            write_atomic(&path, original).unwrap_or_else(|e| {
+            write_atomic(&path, original, &permissions).unwrap_or_else(|e| {
                 fail(&format!(
                     "RESTORE FAILED for {}: {e} — tree is dirty",
                     m.file
@@ -850,7 +913,8 @@ mod tests {
         std::fs::create_dir_all(&dir).unwrap();
         let target = dir.join("f.txt");
         std::fs::write(&target, "old").unwrap();
-        write_atomic(&target, "new").unwrap();
+        let permissions = std::fs::metadata(&target).unwrap().permissions();
+        write_atomic(&target, "new", &permissions).unwrap();
         assert_eq!(std::fs::read_to_string(&target).unwrap(), "new");
         assert!(
             !target.with_extension("mutation-probe.tmp").exists(),
@@ -871,10 +935,39 @@ mod tests {
             .map(|n| MutantConfig {
                 name: n.to_string(),
                 file: "code.txt".to_string(),
-                target: "a".to_string(),
-                replacement: "b".to_string(),
+                target: Some("a".to_string()),
+                replacement: Some("b".to_string()),
+                delete: false,
             })
             .collect()
+    }
+
+    #[test]
+    fn a_mutant_is_delete_alone_or_target_with_replacement() {
+        let shape = |target: Option<&str>, replacement: Option<&str>, delete| MutantConfig {
+            name: "M".to_string(),
+            file: "f".to_string(),
+            target: target.map(str::to_string),
+            replacement: replacement.map(str::to_string),
+            delete,
+        };
+        assert!(matches!(
+            shape(Some("a"), Some("b"), false).edit(),
+            Ok(Edit::Replace {
+                target: "a",
+                replacement: "b"
+            })
+        ));
+        assert!(matches!(shape(None, None, true).edit(), Ok(Edit::Delete)));
+        for bad in [
+            shape(Some("a"), Some("b"), true),
+            shape(Some("a"), None, true),
+            shape(None, None, false),
+            shape(Some("a"), None, false),
+            shape(None, Some("b"), false),
+        ] {
+            assert!(bad.edit().unwrap_err().contains("delete = true"));
+        }
     }
 
     #[test]

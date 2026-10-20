@@ -107,18 +107,47 @@ name = "M01 guard inverted"
 file = "src/lib.rs"
 target = "if !ok {"
 replacement = "if ok {"
+
+[[mutants]]
+name = "M02 module removed"
+file = "src/extra.rs"
+delete = true                                # instead of target + replacement
 ```
 
 Verdicts: `KILLED` (failing tally, or non-zero exit with proof of a run) /
 `SURVIVED` (ran green: a real gap) / `NO-RUN` (no proof the suite ran — crash,
 compile error, timeout — never scored as survived) / `HARNESS-ERROR` (target not
 matched exactly once). A red, silent, or zero-test baseline aborts before any
-probe; writes are atomic and every restore is verified byte-exact; a hung
+probe; writes are atomic, keep the file's mode, and every restore is verified
+byte-exact; a hung
 suite's whole process group is killed at `timeout-secs`. Exit 0 only when every
 probed mutant is killed; 1 on any non-kill; 2 when the pass cannot be trusted.
 `--only <substring>` re-runs a subset while strengthening a killer — repeatable,
 the selections union, and each value must match something; `--json <path>`
 writes the machine-readable report.
+
+## Deterministic mutants from a diff (`mutation-gen`)
+
+Hand-written mutants differ from run to run, so a PR's local pre-run and its
+reviewer never probe the same set. `mutation-gen` enumerates the floor
+mechanically from `git diff <base>...HEAD` and writes it as mutation-probe
+configs:
+
+```sh
+nix run github:rainlanguage/adversarial-mutation-test#mutation-gen -- \
+  --base origin/main --suite suite.toml --shard-size 25 --out-dir gen \
+  -- . ':(exclude)test/**'
+```
+
+Every changed line is crossed with each catalog operator that applies to it
+(comparison, logical, arithmetic and boolean swaps, prefix `!` removal, integer
+literal ±1, line deletion), every added file gets a `delete = true` mutant, and
+every entry of an added one-line list is deleted in turn. Each target is the
+smallest window of whole lines that occurs exactly once in its file. The same
+diff, pathspecs and suite file always produce byte-identical output, and each
+file's header names the merge-base and head it came from. `--shard-size` splits
+the set into consecutive shards, each a complete config one agent can probe;
+without it the whole set goes to stdout. `mutation-gen --help` is the manual.
 
 ## Scan record template
 
