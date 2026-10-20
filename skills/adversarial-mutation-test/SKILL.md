@@ -1,6 +1,6 @@
 ---
 name: adversarial-mutation-test
-version: 0.34.0
+version: 0.36.0
 description: Use to systematically find BUGS in and harden the test suite for a WHOLE repository (or a whole module of it). Two co-equal goals the name carries: ADVERSARIAL (treat spec/intent as the oracle and the code as suspect — derive expected behavior independently and hunt for inputs where the code is wrong) and MUTATION (prove tests cover the code). Mutation-drives a behavior-centric coverage ledger — for each behavior, break the line and check the whole suite: existing tests that kill the mutant are validated and logged (so existing coverage is audited and in scope), and only surviving mutants (real gaps) get a new discriminating test. An existing test that already kills mutants is left as-is; one meant to cover a behavior but that a mutant survives is strengthened in place (not duplicated); one broken on the unmutated baseline is fixed or its underlying code bug surfaced; a test is never edited to swallow a mutation. Designed for long campaigns that outlive the context window: progress lives in a durable gitignored scratch file so it survives compaction. A single change/PR/function is just a narrowed scope. Triggers on "test the whole repo", "harden the test suite", "mutation test the codebase", "audit the tests", "adversarial tests", "prove these tests cover the code", "exhaust the eventualities".
 ---
 
@@ -15,9 +15,9 @@ PR / function is just a narrowed target.
 
 Whole-repo runs are ultracode-shaped: fan out with the native Workflow tool
 (`agent()` / `parallel()` / `pipeline()`, schema-forced returns,
-`resumeFromRunId`, `budget`); a narrowed scope runs inline and serial.
-"Orchestrator" below means the Workflow author when fanned out, the serial
-driver when not.
+`resumeFromRunId`, `budget`); a narrowed scope runs inline and serial, unless
+its generated mutant set needs more than one shard (below). "Orchestrator" below
+means the Workflow author when fanned out, the serial driver when not.
 
 ## Durable progress — two roles, kept separate
 
@@ -92,6 +92,9 @@ adversarial pass judges covered behaviors too.
    the first probe** (the auditable recovery point), and **keep targets out of
    test code** — a target in the oracle co-mutates the expectation and voids the
    probe.
+
+   On a `pr:<n>` scope the mutants file starts from the generated floor (next
+   section), and hand-written mutants go on top.
 4. **Act on verdicts — step 2's survivor set is the worklist.** KILLED =
    covered: credit the killing test in the ledger. SURVIVED = a real gap: if an
    existing test purports to cover the behavior, strengthen it in place until it
@@ -105,6 +108,42 @@ adversarial pass judges covered behaviors too.
    behaviors and keep probing until a full pass adds no new gap. Size and
    per-probe cost change pacing, never scope; an unfinished unit records its
    exact unprobed list rather than being declared done.
+
+## `pr:<n>` runs — the generated floor
+
+A PR's local pre-run and its reviewer converge only if they probe the same set,
+and hand-written mutants differ run to run. The floor is mechanical: in the
+clone's top level, on the PR head, with `suite.toml` holding only `[suite]` (its
+`root` resolves from each shard, so `"../.."` for the out-dir below):
+
+```sh
+nix run github:rainlanguage/adversarial-mutation-test#mutation-gen -- \
+  --base origin/<baseRefName> --suite suite.toml \
+  --shard-size <k> --out-dir .mutation-test/gen -- . ':(exclude)<test paths>'
+```
+
+It enumerates every changed line × each catalog operator that applies, plus
+deleting each added file and each added list entry (`mutation-gen --help` lists
+the operators). The pathspec excludes test code and nothing else. The same diff
+always gives byte-identical shards, so the run records the command and the
+merge-base the header prints, and a second run regenerates and compares; a
+mismatch means base or head moved, never a reason to keep the old set.
+
+- **Every generated mutant is probed and scored**; none is dropped or edited.
+  One that cannot change behaviour (a fragment in a trailing comment, dead text)
+  is recorded as equivalent with its reason — a ledger note, not a removal.
+- **Hand-written adversarial mutants go on top**, in their own file with the
+  same `[suite]`, named `H…`. The floor is what both runs share; the hand set is
+  where each adds judgement, and every one of them still gets probed.
+- **Shards are the unit of probing.** Size `k` like a group (sizing rule above):
+  each mutant is a probe cycle and each survivor a test to write, so start at 25
+  and regenerate smaller into a fresh `--out-dir` on any null return —
+  re-sharding only re-partitions the same set. One shard runs inline; more fan
+  out, one fresh clone and one probe agent per shard. Every shard's probe pass
+  completes on the untouched PR head before any test is written (step 2's
+  attribution rule spans shards), and the orchestrator unions the verdicts —
+  shards are disjoint and ordered, so the union is the set. The survivors are
+  then sliced into kill batches on the behaviour axis as below.
 
 ## Adversarial correctness pass (per unit — the half that finds bugs)
 
@@ -176,6 +215,8 @@ One mutation, one behavior — the failing-test set stays diagnostic.
   code (a 95-behaviour unit is a dozen batches, not one), treating an estimated
   count as a floor; converge loop-until-dry against a seen-set. Agents editing a
   shared TODO list is the known failure mode (duplicate work, no convergence).
+- **A generated set is pre-sliced**: `mutation-gen --shard-size` shards are the
+  probe batches, one agent each; never re-slice one by hand.
 - A `null` agent return is a re-dispatch signal, promptly and in parallel — a
   group is either productive or verifiably empty before the run is complete.
   Probe agents run at low effort; kill/adversarial/synthesis at high.

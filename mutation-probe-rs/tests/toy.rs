@@ -123,12 +123,31 @@ fn weak_suite_scores_all_four_verdicts_and_restores() {
         Some("guard_test"),
         "fail-pattern names the killer"
     );
+    assert_eq!(
+        report["mutants"][3]["detail"].as_str(),
+        Some("target occurs 0x (need exactly 1) — mutates nothing")
+    );
     assert_eq!(report["baseline"]["passed"].as_u64(), Some(2));
     assert_eq!(
         std::fs::read_to_string(dir.join("code.txt")).unwrap(),
         code,
         "the tree must be restored byte-exact after the pass"
     );
+    let _ = std::fs::remove_dir_all(&dir);
+}
+
+#[test]
+fn a_mutant_that_cannot_be_written_aborts_naming_the_file() {
+    let dir = unique_dir("unwritable");
+    let code = "GUARD on\nCAP 10\nMODE strict\n";
+    toy(&dir, code);
+    // write_atomic's temp path, occupied by a directory, so the mutant write fails.
+    std::fs::create_dir_all(dir.join("code.mutation-probe.tmp")).unwrap();
+    let config = write_config(&dir, ALL_FOUR);
+    let (exit, out, _) = run(&config, &["--only", "M-kill"]);
+    assert_eq!(exit, 2, "{out}");
+    assert!(out.contains("cannot write mutant to code.txt"), "{out}");
+    assert_eq!(std::fs::read_to_string(dir.join("code.txt")).unwrap(), code);
     let _ = std::fs::remove_dir_all(&dir);
 }
 
@@ -404,5 +423,75 @@ fn single_only_matching_nothing_aborts_naming_the_value() {
         out.contains("ZZZ-NOTHING"),
         "the abort names the value that matched nothing:\n{out}"
     );
+    let _ = std::fs::remove_dir_all(&dir);
+}
+
+#[cfg(unix)]
+#[test]
+fn delete_mutant_removes_the_file_for_the_probe_and_restores_bytes_and_mode() {
+    use std::os::unix::fs::PermissionsExt;
+    let dir = unique_dir("delete");
+    toy(&dir, "GUARD on\nCAP 10\nMODE strict\n");
+    let check = std::fs::read_to_string(dir.join("check.sh")).unwrap();
+    std::fs::write(
+        dir.join("check.sh"),
+        check.replacen("p=0; f=0\n", "p=0; f=0\n[ -x tool.sh ] || f=$((f+1))\n", 1),
+    )
+    .unwrap();
+    std::fs::write(dir.join("tool.sh"), "#!/bin/sh\n").unwrap();
+    std::fs::set_permissions(dir.join("tool.sh"), std::fs::Permissions::from_mode(0o755)).unwrap();
+    let config = write_config(
+        &dir,
+        r##"
+[[mutants]]
+name = "M-delete tool"
+file = "tool.sh"
+delete = true
+
+[[mutants]]
+name = "M-edit tool"
+file = "tool.sh"
+target = "#!/bin/sh"
+replacement = "#!/bin/sh -e"
+"##,
+    );
+    let (exit, out, report) = run(&config, &[]);
+    assert_eq!(exit, 1, "the edit survives; output:\n{out}");
+    assert_eq!(report["mutants"][0]["verdict"].as_str(), Some("KILLED"));
+    assert_eq!(
+        report["mutants"][1]["verdict"].as_str(),
+        Some("SURVIVED"),
+        "the edit's probe still sees an executable tool.sh"
+    );
+    assert_eq!(
+        std::fs::read_to_string(dir.join("tool.sh")).unwrap(),
+        "#!/bin/sh\n"
+    );
+    let mode = std::fs::metadata(dir.join("tool.sh"))
+        .unwrap()
+        .permissions()
+        .mode();
+    assert_eq!(mode & 0o777, 0o755, "restore keeps the mode");
+    let _ = std::fs::remove_dir_all(&dir);
+}
+
+#[test]
+fn a_mutant_with_delete_and_a_target_is_a_config_error() {
+    let dir = unique_dir("shape");
+    toy(&dir, "GUARD on\nCAP 10\nMODE strict\n");
+    let config = write_config(
+        &dir,
+        r#"
+[[mutants]]
+name = "M-both"
+file = "code.txt"
+target = "GUARD on"
+replacement = "GUARD off"
+delete = true
+"#,
+    );
+    let (exit, out, _) = run(&config, &[]);
+    assert_eq!(exit, 2, "{out}");
+    assert!(out.contains("M-both"), "{out}");
     let _ = std::fs::remove_dir_all(&dir);
 }

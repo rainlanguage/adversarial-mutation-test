@@ -1,0 +1,66 @@
+mutation-probe — apply exact-string mutants, prove the suite ran, score honestly.
+
+USAGE
+    mutation-probe <mutants.toml> [--json <path>] [--only <substring>]...
+
+    --json <path>       also write the machine-readable report
+    --only <substring>  probe EVERY mutant whose name contains the substring, so a
+                        short value ("M07") also selects longer names ("M070").
+                        Repeatable: the selections UNION. Deliberately not exact
+                        matching: names carry prose, and over-selection is
+                        fail-safe — the extra mutants are probed and scored, exit
+                        0 still demands all of them KILLED, and a value matching
+                        nothing is an error (checked per value), never a silent
+                        no-op.
+    --help, -h          this manual
+
+MUTANTS FILE (TOML)
+    [suite]
+    root = "."                    # repo the suite runs in, relative to this file
+    command = ["sh", "check.sh"]  # argv, no shell. Include any artifact regeneration
+                                  # here (wrapper script is fine): the probe runs
+                                  # exactly this per verdict, and a suite that tests
+                                  # stale artifacts is the #1 way a matrix lies.
+    proof = '(\d+) passed; (\d+) failed'
+                                  # 2 capture groups: passed, failed — read from the
+                                  # suite's own tally. Multiple matches SUM (cargo
+                                  # prints one line per test binary). No match =
+                                  # the suite did not provably run.
+    fail-pattern = 'test (\S+) \.\.\. FAILED'   # optional: 1 group naming a killer
+    timeout-secs = 1800           # optional; the suite's process group is killed
+
+    [[mutants]]
+    name = "M01 guard inverted"
+    file = "src/lib.rs"           # relative to root
+    target = "if !ok {"           # must occur EXACTLY once in the file
+    replacement = "if ok {"
+
+    [[mutants]]
+    name = "M02 module removed"
+    file = "src/extra.rs"
+    delete = true                 # instead of target + replacement: the file is
+                                  # removed for the probe, then restored
+
+    mutation-gen writes these files from a git diff (mutation-gen --help).
+
+VERDICTS
+    KILLED         suite ran and failed (failing tally, or non-zero exit with proof
+                   present — the tally is trusted over a lying wrapper exit code,
+                   and vice versa)
+    SURVIVED       suite ran green: a real coverage gap
+    NO-RUN         no proof the suite ran (crash / compile error / timeout) —
+                   unscorable, never "survived"
+    HARNESS-ERROR  the mutant is invalid: target not found exactly once
+
+INTEGRITY (enforced)
+    A red, silent, or zero-test baseline aborts before any probe. Writes are
+    atomic (temp + rename) and keep the file's mode: no failure mode leaves a
+    file truncated. Every restore is verified byte-exact, and each file is
+    re-checked pristine before the next mutant. Suite output is capped per
+    stream (oldest bytes dropped).
+
+EXIT CODES
+    0  baseline green and every probed mutant KILLED
+    1  the pass ran; something SURVIVED, was NO-RUN, or was a HARNESS-ERROR
+    2  the pass could not run or be trusted (config error, red baseline,
+       restore failure)

@@ -41,12 +41,21 @@
           meta.mainProgram = "mutation-probe";
           inherit src;
           cargoLock.lockFile = ./Cargo.lock;
+          # tests/gen.rs builds toy git repos.
+          nativeCheckInputs = [ pkgs.git ];
         };
       in
       {
         packages = {
           inherit mutation-probe;
           default = mutation-probe;
+        };
+        # The package's other bin, so it costs no second build:
+        # `nix run …#mutation-gen -- --base origin/main …`.
+        apps.mutation-gen = {
+          type = "app";
+          program = "${mutation-probe}/bin/mutation-gen";
+          meta.description = "Enumerate a diff's mutants deterministically, as mutation-probe configs";
         };
         devShells.default = pkgs.mkShell {
           packages = [

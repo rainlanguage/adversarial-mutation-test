@@ -1,0 +1,32 @@
+mutation-gen — enumerate a PR's mutants mechanically from its diff.
+
+USAGE
+    mutation-gen --base <rev> --suite <suite.toml> [--shard-size <k> --out-dir <dir>]
+                 [-- <pathspec>...]
+
+    Run from the repository's top level, on a working tree whose changed files match
+    HEAD. Mutants come from `git diff <base>...HEAD` restricted to the pathspecs
+    (git's own syntax, e.g. `. ':(exclude)test/**'`). The same diff, pathspecs and
+    suite file always produce byte-identical output.
+
+    --base <rev>        the PR's base (e.g. origin/main); diffed from its merge-base
+    --suite <file>      a TOML file holding only the [suite] table, copied verbatim;
+                        its `root` must resolve to the repository top level, which
+                        every generated `file` is relative to
+    --shard-size <k>    split the set into consecutive shards of at most k mutants,
+                        written as <dir>/shard-NNN.toml, each a complete config
+    --out-dir <dir>     where shards go; must not exist or be empty
+    (no --shard-size)   the whole set goes to stdout
+
+MUTANTS
+    Per changed (added-side) line, skipping comment lines:
+      ===/!==, ==/!=, <= -> <, >= -> >, &&/||, +=/-=      (no operator char adjacent)
+      ' < ' -> ' <= ', ' > ' -> ' >= ', ' + '/' - ', ' * '/' / '     (spaced only)
+      drop a prefix `!`; true/false; integer literal n -> n+1, n-1
+      delete each entry of a one-line [a, b, ...] list (two or more entries)
+      delete the line (named delete-entry when it ends in `,`: a multi-line entry)
+    Per added file: delete the file (mutation-probe `delete = true`).
+    Targets are the smallest window of whole lines around the change that occurs
+    exactly once in the file. Identical edits are emitted once. Names are
+    `G<ordinal> <path>:<line>:<col> <operator>`; non-UTF-8 files, symlinks and
+    submodules are listed as skipped in the header.
