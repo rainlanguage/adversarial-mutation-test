@@ -514,7 +514,8 @@ INTEGRITY (enforced)
     A red, silent, or zero-test baseline aborts before any probe. Writes are
     atomic (temp + rename) and keep the file's mode: no failure mode leaves a
     file truncated. Every restore is verified byte-exact, and each file is
-    re-checked pristine before the next mutant. Suite output is capped per stream (oldest bytes dropped).
+    re-checked pristine before the next mutant. Suite output is capped per
+    stream (oldest bytes dropped).
 
 EXIT CODES
     0  baseline green and every probed mutant KILLED
